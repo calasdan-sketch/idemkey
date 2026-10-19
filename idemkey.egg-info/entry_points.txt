@@ -1,0 +1,2 @@
+[console_scripts]
+idemkey = idemkey.cli:main

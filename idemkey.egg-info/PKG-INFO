@@ -1,0 +1,192 @@
+Metadata-Version: 2.4
+Name: idemkey
+Version: 0.1.0
+Summary: Drop-in idempotency keys for agent tool calls: dedup, safe retry, partial-success verification
+Author: Calas Automations Inc.
+License: MIT
+Keywords: idempotency,agents,mcp,retry,dedup,tools
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Topic :: Software Development :: Libraries :: Python Modules
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+
+# idemkey
+
+Drop-in idempotency keys for agent tool calls: dedup, safe retry, and
+partial-success verification. Zero dependencies, SQLite-backed.
+
+**The problem:** every agent failure mode in 2026 was an idempotency problem —
+the order-capture agent retried with a fresh UUID each attempt (duplicate
+orders), the webhook retried (inventory decremented twice), the triage agent
+filed six duplicate tickets by morning. An agent can't tell "the call never
+ran" from "the call ran but the response was lost," so it re-executes a
+non-idempotent write.
+
+**The fix:** wrap the tool. The agent passes a stable key per logical
+operation; retries reuse the key; the wrapper deduplicates and replays the
+stored result instead of re-executing.
+
+```python
+from idemkey import guard, new_key
+
+def capture_order(order_id: str) -> dict: ...   # your real tool
+
+capture = guard(capture_order, verify=order_exists_in_db)
+
+key = new_key()                      # or "order-7f3a" — the agent owns the key
+capture("ord-123", idemkey=key)       # executes
+capture("ord-123", idemkey=key)       # timeout retry -> replays stored result, never re-charges
+```
+
+## Install
+
+```bash
+pip install idemkey        # not yet published — v1 is local-only
+```
+
+No dependencies. Python 3.9+.
+
+## Usage
+
+### The one rule
+
+> **No key → no retry, no dedup.** A wrapped call without a key executes
+> exactly once and is never retried. Retries and dedup happen only when a key
+> is present. This is deliberate: silently retrying a keyless write is how
+> duplicate orders happen.
+
+Three ways to supply the key:
+
+```python
+# 1. Per-call kwarg (recommended — the agent owns the key lifecycle)
+capture(order, idemkey="order-7f3a")
+
+# 2. Fixed key at wrap time (rare; every call shares it)
+guard(fn, key="singleton-op")
+
+# 3. Derived key, opt-in (only for by-construction-idempotent operations
+#    like ensure_webhook_registered — NEVER for transfer()-style calls an
+#    agent may legitimately invoke twice with identical args)
+guard(fn, derive=True, scope="webhooks")
+```
+
+The kwarg name defaults to `idemkey` and is popped before your function is
+called (configurable via `key_arg=`).
+
+### Safe retry
+
+Only *exceptions* you classify as retryable are retried — default
+`(TimeoutError, RetryableError)`, exponential backoff with full jitter,
+3 retries. A returned result is **never** retried: after a result comes back
+you can't know whether the write landed, so it's verified and committed
+instead. Non-retryable exceptions propagate immediately with no second
+execution, and the key is marked `failed` so a later retry with the same key
+re-executes cleanly.
+
+```python
+from idemkey import RetryableError
+
+@guard(max_retries=5, retry_on=(TimeoutError, RetryableError))
+def flaky_tool(...): ...
+```
+
+### Partial-success verification
+
+The `verify` hook runs after the write and before success is reported —
+this catches "response lost but write landed":
+
+```python
+capture = guard(raw_capture, verify=lambda result: order_exists(result["id"]))
+# verify returns False (or raises) -> VerificationError, key marked failed.
+# NOTE: the write may still have landed; outcome is "unknown", not "failed".
+```
+
+### Same key, different args → loud error
+
+The key locks to a fingerprint of (tool, args) on first use. Reusing a key
+with different arguments raises `FingerprintMismatchError` — that's two
+different operations sharing a key, or arg drift between retries, and
+silently replaying call A's result for call B is worse than crashing.
+Override with `fingerprint_policy="warn"` or `"replay"` if you mean it.
+
+### MCP adapter
+
+MCP tools are plain functions, so `guard` already covers them — `mcp_tool`
+just attaches the tool metadata in one step:
+
+```python
+from mcp.server.fastmcp import FastMCP
+from idemkey import mcp_tool
+
+mcp = FastMCP("orders")
+
+@mcp.tool()
+@mcp_tool(verify=order_exists)
+def capture_order(order_id: str) -> dict: ...
+
+# LangChain / CrewAI: guard() returns a plain callable, so
+# langchain_core.tools.tool(guard(fn, ...)) composes directly.
+```
+
+### CLI
+
+```bash
+idemkey log --status failed --limit 20   # recent entries
+idemkey show order-7f3a                  # full row incl. replayed result
+idemkey stats                            # counts by status
+idemkey purge --older-than 24            # delete entries older than 24h (default TTL)
+```
+
+Store location: `--store PATH`, or `IDEMKEY_STORE` env, or
+`~/.idemkey/store.db`. (`python -m idemkey` works too.)
+
+### API reference
+
+| Name | Kind |
+|---|---|
+| `guard(fn, **opts)` | decorator / wrapper factory (also `@guard`, `@guard(...)`) |
+| `mcp_tool(fn, *, name, description, **guard_opts)` | MCP-tool wrapper |
+| `new_key(prefix="idem_")` | random key |
+| `derive_key(tool, args, kwargs, scope)` | deterministic key (opt-in) |
+| `DedupStore(path)` | SQLite store (WAL, thread-safe) |
+| Errors | `IdemKeyError`, `RetryableError`, `FingerprintMismatchError`, `VerificationError`, `ResultNotReplayableError`, `PreviousAttemptFailedError`, `InflightTimeoutError`, `StoreCorruptedError` |
+
+Key `guard()` options: `key`, `key_arg="idemkey"`, `tool`, `derive=False`,
+`scope="default"`, `store`, `max_retries=3`, `backoff_base=0.5`,
+`backoff_cap=30.0`, `retry_on=(TimeoutError, RetryableError)`,
+`verify=None`, `fingerprint_policy="error"`, `claim_ttl=300.0`,
+`inflight_timeout=60.0`, `result_max_bytes=1_000_000`.
+
+## Limitations (honest)
+
+- **At-least-once execution, exactly-once *effect*.** Nothing makes a network
+  call truly exactly-once. The store turns the second execution into a replay;
+  if the process dies between your write and the store commit, the next retry
+  re-executes. Design your tools so re-execution after a *failed* key is safe.
+- **Wall-clock TTL.** Stale-claim reclamation uses wall-clock heartbeats. An
+  NTP jump forward can prematurely stale a live claim. Set `claim_ttl` above
+  your max expected execution time; the wrapper heartbeats during execution to
+  cover the normal case.
+- **Single-file SQLite.** No cross-host dedup without a shared filesystem, and
+  SQLite WAL on NFS is unsupported — keep the store on local disk.
+- **`verify` can't un-land a write.** A false/lying verify hook reports
+  success for a write that never landed. Make verify a real read-back check,
+  keep it fast and bounded.
+- **Replay returns the original result**, even if the world changed since
+  (Stripe parity). Results go through a JSON round-trip: tuples come back as
+  lists, arbitrary objects as `repr()` strings, payloads over
+  `result_max_bytes` aren't replayable (`ResultNotReplayableError` on dup).
+- **Derived keys dedup across processes** sharing a store when (scope, tool,
+  args) collide — by design; scope accordingly, and never derive keys for
+  intentionally-repeatable operations.
+- **Keys are bearer tokens for replay.** Anyone who can guess a key gets the
+  stored result. The store file holds results in plaintext — set file
+  permissions accordingly.
+- **No async API in v1.** Wrap sync callables; `asyncio` support is on the roadmap.
+- **Fingerprinting is of serialized arguments.** Objects with identical
+  `repr()` share a fingerprint; keyword spelling is canonicalised via the
+  function signature, but exotic callables without introspectable signatures
+  fall back to raw args.
