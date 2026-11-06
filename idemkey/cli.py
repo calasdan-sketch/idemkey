@@ -4,6 +4,7 @@
     idemkey show KEY [--store PATH]
     idemkey purge [--store PATH] [--older-than HOURS]
     idemkey stats [--store PATH]
+    idemkey forget KEY [--store PATH]
 """
 
 from __future__ import annotations
@@ -67,6 +68,23 @@ def cmd_purge(args):
     print(f"purged {n} entr{'y' if n == 1 else 'ies'} older than {args.older_than}h")
 
 
+def cmd_forget(args):
+    store = _resolve_store(args.store)
+    row = store.get(args.key)
+    if row is None:
+        print(f"key {args.key!r} not found", file=sys.stderr)
+        raise SystemExit(1)
+    if row["status"] == "pending" and not args.force:
+        print(
+            f"key {args.key!r} is pending (an execution may be in flight). "
+            f"Re-run with --force only if you are sure its owner is dead.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    store.delete(args.key)
+    print(f"forgot {args.key!r} (was {row['status']}); its next use will execute again")
+
+
 def cmd_stats(args):
     store = _resolve_store(args.store)
     s = store.stats()
@@ -93,6 +111,13 @@ def build_parser():
     pp = sub.add_parser("purge", help="delete entries older than the TTL")
     pp.add_argument("--older-than", type=float, default=24.0, help="hours (default 24)")
     pp.set_defaults(func=cmd_purge)
+
+    pf = sub.add_parser(
+        "forget", help="delete one key so its next use re-executes (after checking by hand)"
+    )
+    pf.add_argument("key")
+    pf.add_argument("--force", action="store_true", help="also forget a pending key")
+    pf.set_defaults(func=cmd_forget)
 
     pt = sub.add_parser("stats", help="store statistics")
     pt.set_defaults(func=cmd_stats)

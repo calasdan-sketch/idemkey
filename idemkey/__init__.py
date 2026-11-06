@@ -14,9 +14,13 @@ At-least-once execution, exactly-once *effect* (as observed via the store).
 
 from .adapters import mcp_tool
 from .guard import (
+    MAX_KEY_LENGTH,
+    ClaimLostWarning,
     FingerprintMismatchError,
     IdemKeyError,
     InflightTimeoutError,
+    InvalidKeyError,
+    MissingKeyError,
     PreviousAttemptFailedError,
     ResultNotReplayableError,
     RetryableError,
@@ -27,13 +31,17 @@ from .guard import (
 from .keys import derive_key, fingerprint, is_derived, new_key
 from .store import DedupStore, StoreCorruptedError
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 __all__ = [
+    "MAX_KEY_LENGTH",
+    "ClaimLostWarning",
     "DedupStore",
     "FingerprintMismatchError",
     "IdemKeyError",
     "InflightTimeoutError",
+    "InvalidKeyError",
+    "MissingKeyError",
     "PreviousAttemptFailedError",
     "ResultNotReplayableError",
     "RetryableError",

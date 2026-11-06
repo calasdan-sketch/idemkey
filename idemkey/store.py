@@ -130,7 +130,7 @@ class DedupStore:
             return self._get_locked(key)
 
     # -- claim protocol ----------------------------------------------------
-    def claim(self, key, tool, fingerprint, scope, owner, claim_ttl):
+    def claim(self, key, tool, fingerprint, scope, owner, claim_ttl, ttl=None):
         """Try to claim key for execution.
 
         Returns ``(outcome, row)`` where outcome is one of:
@@ -138,6 +138,12 @@ class DedupStore:
           * ``"duplicate"`` — row exists with status completed|failed; caller
                               decides (replay result / reclaim for retry).
           * ``"inflight"``  — another live owner holds it; caller should wait.
+
+        ``ttl`` (seconds, optional): a settled row (completed|failed) last
+        updated more than ``ttl`` seconds ago is treated as expired and
+        atomically re-claimed as a brand-new operation (Stripe semantics: a
+        key reused after it was pruned starts a new request). ``None`` means
+        settled rows never expire on their own (only ``purge`` removes them).
         """
         now = time.time()
         with self._lock:
@@ -156,6 +162,29 @@ class DedupStore:
             if row is None:  # lost a race with purge; treat as claimable next call
                 return "inflight", None
             if row["status"] in ("completed", "failed"):
+                if ttl is not None and now - row["updated_at"] > ttl:
+                    # Expired: overwrite in place as a fresh claim. The
+                    # updated_at guard makes this a compare-and-swap, so of
+                    # several racers exactly one wins.
+                    cur = self._conn.execute(
+                        """UPDATE idem_keys
+                           SET tool = ?, fingerprint = ?, scope = ?,
+                               status = 'pending', result_json = NULL,
+                               replayable = 1, error = NULL, attempts = 1,
+                               owner = ?, created_at = ?, updated_at = ?,
+                               heartbeat = ?
+                           WHERE key = ? AND status = ? AND updated_at = ?""",
+                        (tool, fingerprint, scope, owner, now, now, now,
+                         key, row["status"], row["updated_at"]),
+                    )
+                    self._conn.commit()
+                    if cur.rowcount == 1:
+                        return "claimed", self._get_locked(key)
+                    row = self._get_locked(key)
+                    if row is None:
+                        return "inflight", None
+                    if row["status"] == "pending":
+                        return "inflight", row
                 return "duplicate", row
             # pending: reclaim if the owner's heartbeat went stale (owner died)
             if now - row["heartbeat"] > claim_ttl:
@@ -190,31 +219,73 @@ class DedupStore:
         with self._lock:
             self._ensure_open()
             self._conn.execute(
-                "UPDATE idem_keys SET heartbeat = ?, updated_at = ? WHERE key = ? AND owner = ?",
+                "UPDATE idem_keys SET heartbeat = ?, updated_at = ? "
+                "WHERE key = ? AND owner = ? AND status = 'pending'",
                 (time.time(), time.time(), key, owner),
             )
             self._conn.commit()
 
-    def complete(self, key, result_json, replayable=True):
-        with self._lock:
-            self._ensure_open()
-            self._conn.execute(
-                """UPDATE idem_keys
-                   SET status = 'completed', result_json = ?, replayable = ?,
-                       error = NULL, updated_at = ?, heartbeat = ?
-                   WHERE key = ?""",
-                (result_json, 1 if replayable else 0, time.time(), time.time(), key),
-            )
-            self._conn.commit()
+    def complete(self, key, result_json, replayable=True, owner=None):
+        """Mark ``key`` completed with its replay payload.
 
-    def fail(self, key, error):
+        With ``owner`` set, the write is *fenced*: it only applies while the
+        row is still ``pending`` and held by that owner. Returns ``True`` if
+        the row was updated, ``False`` if the claim had been lost (a stale
+        claim was taken over by another owner) — in which case the other
+        owner's outcome is left untouched.
+        """
+        now = time.time()
         with self._lock:
             self._ensure_open()
-            self._conn.execute(
-                "UPDATE idem_keys SET status = 'failed', error = ?, updated_at = ? WHERE key = ?",
-                (error, time.time(), key),
-            )
+            if owner is None:
+                cur = self._conn.execute(
+                    """UPDATE idem_keys
+                       SET status = 'completed', result_json = ?, replayable = ?,
+                           error = NULL, updated_at = ?, heartbeat = ?
+                       WHERE key = ?""",
+                    (result_json, 1 if replayable else 0, now, now, key),
+                )
+            else:
+                cur = self._conn.execute(
+                    """UPDATE idem_keys
+                       SET status = 'completed', result_json = ?, replayable = ?,
+                           error = NULL, updated_at = ?, heartbeat = ?
+                       WHERE key = ? AND owner = ? AND status = 'pending'""",
+                    (result_json, 1 if replayable else 0, now, now, key, owner),
+                )
             self._conn.commit()
+            return cur.rowcount == 1
+
+    def fail(self, key, error, owner=None):
+        """Mark ``key`` failed. Fenced by ``owner`` like :meth:`complete`."""
+        now = time.time()
+        with self._lock:
+            self._ensure_open()
+            if owner is None:
+                cur = self._conn.execute(
+                    "UPDATE idem_keys SET status = 'failed', error = ?, updated_at = ? WHERE key = ?",
+                    (error, now, key),
+                )
+            else:
+                cur = self._conn.execute(
+                    """UPDATE idem_keys SET status = 'failed', error = ?, updated_at = ?
+                       WHERE key = ? AND owner = ? AND status = 'pending'""",
+                    (error, now, key, owner),
+                )
+            self._conn.commit()
+            return cur.rowcount == 1
+
+    def delete(self, key):
+        """Remove one key so its next use re-executes. Returns ``True`` if it existed.
+
+        This is the manual escape hatch for an "unknown outcome" key after
+        you have checked the downstream system by hand.
+        """
+        with self._lock:
+            self._ensure_open()
+            cur = self._conn.execute("DELETE FROM idem_keys WHERE key = ?", (key,))
+            self._conn.commit()
+            return cur.rowcount == 1
 
     def wait_until_settled(self, key, timeout, poll_interval=0.05):
         """Block until the row leaves 'pending'. Returns the settled row.
