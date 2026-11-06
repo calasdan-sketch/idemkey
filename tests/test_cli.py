@@ -40,7 +40,7 @@ def test_show(capsys, db):
     main(["--store", db, "show", "ord-1"])
     out = capsys.readouterr().out
     data = json.loads(out)
-    assert data["key"] == "ord-1"
+    assert data["key"] == "default|charge||ord-1"  # namespaced (scope|tool|prefix|key)
     assert data["result"] == {"charged": 100}
     assert data["status"] == "completed"
 
