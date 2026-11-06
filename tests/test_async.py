@@ -4,15 +4,19 @@ import asyncio
 import inspect
 
 import pytest
+from conftest import one
 
 from idemkey import (
     DedupStore,
     FingerprintMismatchError,
     InflightTimeoutError,
+    OutcomeUnknownError,
     VerificationError,
+    fingerprint,
     guard,
     mcp_tool,
 )
+from idemkey.guard import namespaced_key
 
 
 @pytest.fixture()
@@ -53,7 +57,7 @@ def test_async_duplicate_replays_real_result_not_coroutine_repr(store):
     a, b = run(main())
     assert a == b == {"charged": 5}
     assert calls == [5]
-    assert '"charged": 5' in store.get("k1")["result_json"]
+    assert '"charged": 5' in one(store, "k1")["result_json"]
 
 
 def test_async_retry_with_async_sleep(store):
@@ -85,7 +89,7 @@ def test_async_non_retryable_marks_failed_then_reexecutes(store):
 
     with pytest.raises(ValueError):
         run(tool(idemkey="k"))
-    assert store.get("k")["status"] == "failed"
+    assert one(store, "k")["status"] == "failed"
     assert run(tool(idemkey="k")) == "second"
     assert len(calls) == 2
 
@@ -110,7 +114,7 @@ def test_async_verify_may_be_async(store):
 
     with pytest.raises(VerificationError):
         run(tool(idemkey="k"))
-    assert store.get("k")["status"] == "failed"
+    assert one(store, "k")["status"] == "failed"
 
 
 def test_async_concurrent_tasks_single_execution(store):
@@ -133,7 +137,8 @@ def test_async_concurrent_tasks_single_execution(store):
 def test_async_waiting_does_not_block_event_loop(store):
     # A wedged pending owner: the waiter must poll with asyncio.sleep so other
     # tasks keep running while it waits.
-    store.claim("k", "tool", "fp", "default", "other:1:x", 300)
+    store.claim(namespaced_key("k", "tool"), "tool", fingerprint("tool"), "default",
+                "other:1:x", 300)
     ticks = []
 
     @guard(store=store, inflight_timeout=0.3)
@@ -155,14 +160,13 @@ def test_async_waiting_does_not_block_event_loop(store):
     assert len(ticks) == 5
 
 
-def test_async_cancellation_marks_failed_so_retry_reexecutes(store):
+def test_async_cancellation_mid_call_is_unknown_never_reexecuted(store):
     calls = []
 
     @guard(store=store)
     async def tool():
         calls.append(1)
-        if len(calls) == 1:
-            await asyncio.sleep(10)
+        await asyncio.sleep(10)
         return "done"
 
     async def main():
@@ -171,11 +175,12 @@ def test_async_cancellation_marks_failed_so_retry_reexecutes(store):
         t.cancel()
         with pytest.raises(asyncio.CancelledError):
             await t
-        assert store.get("k")["status"] == "failed"
-        return await tool(idemkey="k")
+        assert one(store, "k")["status"] == "unknown"
+        with pytest.raises(OutcomeUnknownError):
+            await tool(idemkey="k")
 
-    assert run(main()) == "done"
-    assert len(calls) == 2
+    run(main())
+    assert len(calls) == 1  # the write is never run a second time
 
 
 def test_async_no_key_runs_once_without_store(store):
@@ -201,7 +206,7 @@ def test_async_mcp_tool(store):
     assert capture.mcp_tool_name == "cap"
     assert "idemkey" in inspect.signature(capture).parameters
     assert run(capture("o1", idemkey="k")) == {"id": "o1"}
-    assert store.get("k")["tool"] == "cap"
+    assert one(store, "k")["tool"] == "cap"
 
 
 def test_async_callable_instance_detected(store):

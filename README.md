@@ -139,9 +139,19 @@ Override with `fingerprint_policy="warn"` or `"replay"` if you mean it.
 
 `async def` tools work out of the box — same rules, and the wrapper never
 blocks the event loop (store I/O runs in a worker thread; waits use
-`asyncio.sleep`). `verify` may be async too. If the owning task is cancelled
-mid-call, the key is marked `failed` (outcome unknown) so a same-key retry
-re-executes instead of hanging until `claim_ttl`.
+`asyncio.sleep`). `verify` may be async too.
+
+Cancellation (an MCP client timing out cancels the handler) is handled
+without guessing:
+
+| Cancelled while… | Key becomes | Same-key retry |
+|---|---|---|
+| claiming, before the tool started | `failed` | executes normally (nothing ran) |
+| the tool or `verify` was running | `unknown` | raises `OutcomeUnknownError` — never re-runs a write that may have landed |
+| the result was being saved | `completed` (save is shielded) | replays the real result |
+
+Clear an `unknown` key with `idemkey forget KEY` after checking the
+downstream system, or let a `ttl` expire it.
 
 ```python
 @guard(verify=order_exists_async)
@@ -171,9 +181,44 @@ def capture_order(order_id: str) -> dict: ...
 # signature (+ idemkey), so langchain_core.tools.tool(guard(fn)) composes.
 ```
 
+With `require_key=True` the key is a *required* string in the schema, so
+the model is told up front that it must send one. Annotations written under
+`from __future__ import annotations` (e.g. pydantic models) are resolved
+against your module, so registration works either way.
+
 > Upgrading from 0.1.x: before 0.2.0 the signature did **not** include
 > `idemkey`, so MCP servers silently dropped the key and every call ran
-> without dedup. Verified against mcp 1.x and 2.x; see `tests/test_safety.py`.
+> without dedup. Tested locally against mcp 1.30 and 2.3 (`tests/test_safety.py`,
+> `tests/test_future_annotations.py`); the CI `mcp` job runs those tests on
+> both SDK lines and fails if any of them is skipped.
+
+### Namespaces and multiple clients
+
+Putting `idemkey` in the tool schema means **the model chooses the key**.
+idemkey stores every key as `scope|tool|prefix|key`, so:
+
+- the same key on two tools (`charge` and `refund` both using
+  `order-123`) never collides;
+- a different call reusing a key never gets the other call's result (the
+  argument fingerprint check, on by default);
+- **on a server shared by several clients, give each client its own
+  `key_prefix`.** Without it, client A can claim a predictable key such as
+  `order-123` first with junk arguments, and client B's genuine call then
+  fails with `FingerprintMismatchError` until the key expires ("key
+  squatting"); the error also tells B that the key exists.
+
+```python
+import contextvars
+current_client = contextvars.ContextVar("client", default="")
+
+guard(fn, key_prefix=current_client.get)   # str, or a zero-arg callable per call
+```
+
+Scope, tool name and prefix may not contain `|`; the user key may. Pass
+`namespace=False` only to keep reading a store written by 0.1.x, which stored
+raw keys. The CLI accepts the plain key the agent used (`idemkey show
+order-7f3a`) and lists the full stored keys if it exists in several
+namespaces.
 
 ### Key expiry (optional)
 
@@ -196,7 +241,12 @@ idemkey forget order-7f3a                # after checking by hand: let this key 
 ```
 
 `forget` refuses a `pending` key (an execution may still be running) unless
-you add `--force`.
+you add `--force`; the status check and the delete are a single atomic
+statement. `purge` never deletes `pending` rows unless you pass
+`--include-stale-pending` (then only those whose heartbeat is older than the
+cutoff), and `--older-than` must be positive. Keys with control characters
+are rejected at call time, and `log` escapes anything non-printable, so a
+model-chosen key can't rewrite your terminal.
 
 Store location: `--store PATH`, or `IDEMKEY_STORE` env, or
 `~/.idemkey/store.db`. (`python -m idemkey` works too.)
@@ -209,12 +259,13 @@ Store location: `--store PATH`, or `IDEMKEY_STORE` env, or
 | `mcp_tool(fn, *, name, description, **guard_opts)` | MCP-tool wrapper |
 | `new_key(prefix="idem_")` | random key |
 | `derive_key(tool, args, kwargs, scope)` | deterministic key (opt-in) |
+| `guarded.store_key(key)` / `namespaced_key(key, tool, scope, prefix)` | the key exactly as stored |
 | `DedupStore(path)` | SQLite store (WAL, thread-safe) |
-| Errors | `IdemKeyError`, `RetryableError`, `FingerprintMismatchError`, `VerificationError`, `ResultNotReplayableError`, `PreviousAttemptFailedError`, `InflightTimeoutError`, `InvalidKeyError`, `MissingKeyError`, `StoreCorruptedError` |
+| Errors | `IdemKeyError`, `RetryableError`, `FingerprintMismatchError`, `VerificationError`, `ResultNotReplayableError`, `PreviousAttemptFailedError`, `InflightTimeoutError`, `InvalidKeyError`, `MissingKeyError`, `OutcomeUnknownError`, `StoreCorruptedError` |
 | Warnings | `ClaimLostWarning` — this execution's claim was taken over before it could record its result |
 
 Key `guard()` options: `key`, `key_arg="idemkey"`, `tool`, `derive=False`,
-`require_key=False`, `scope="default"`, `store`, `max_retries=3`, `backoff_base=0.5`,
+`require_key=False`, `scope="default"`, `key_prefix=None`, `namespace=True`, `store`, `max_retries=3`, `backoff_base=0.5`,
 `backoff_cap=30.0`, `retry_on=(TimeoutError, RetryableError)`,
 `verify=None`, `fingerprint_policy="error"`, `claim_ttl=300.0`,
 `inflight_timeout=60.0`, `ttl=None`, `result_max_bytes=1_000_000`.
@@ -265,8 +316,12 @@ timeouts and budget caps.
 - **Derived keys dedup across processes** sharing a store when (scope, tool,
   args) collide — by design; scope accordingly, and never derive keys for
   intentionally-repeatable operations.
-- **Keys are bearer tokens for replay.** Anyone who can guess a key gets the
-  stored result. The store file holds results in plaintext — idemkey creates
+- **Keys are bearer tokens for replay — with the default fingerprint policy,
+  only for an identical call.** A guessed key replays the stored result only
+  if the tool and arguments match exactly; with `fingerprint_policy="warn"`
+  or `"replay"` a guessed key returns another call's result, so don't use
+  those on multi-client servers. See *Namespaces and multiple clients* for
+  key squatting. The store file holds results in plaintext — idemkey creates
   the file `0600` (and directories it creates `0700`) automatically, but an
   operator can still loosen that afterwards, so treat the store as sensitive.
 - **Fork-safe.** A `DedupStore` opened before `os.fork()` reconnects

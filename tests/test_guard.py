@@ -2,6 +2,7 @@ import threading
 import time
 
 import pytest
+from conftest import one
 
 from idemkey import (
     DedupStore,
@@ -10,9 +11,11 @@ from idemkey import (
     ResultNotReplayableError,
     RetryableError,
     VerificationError,
+    fingerprint,
     guard,
     new_key,
 )
+from idemkey.guard import namespaced_key
 
 
 @pytest.fixture()
@@ -52,7 +55,7 @@ def test_retry_on_timeout_then_success(store):
 
     assert flaky(idemkey="k1") == {"ok": True}
     assert len(calls) == 3
-    assert store.get("k1")["status"] == "completed"
+    assert one(store, "k1")["status"] == "completed"
 
 
 def test_retryable_error_retried_by_default(store):
@@ -79,7 +82,7 @@ def test_non_retryable_no_second_execution(store):
     with pytest.raises(ValueError):
         f(idemkey="k1")
     assert len(calls) == 1
-    row = store.get("k1")
+    row = one(store, "k1")
     assert row["status"] == "failed"
     assert "ValueError" in row["error"]
 
@@ -104,7 +107,7 @@ def test_retry_exhaustion_marks_failed(store):
 
     with pytest.raises(TimeoutError):
         f(idemkey="k1")
-    assert store.get("k1")["status"] == "failed"
+    assert one(store, "k1")["status"] == "failed"
 
 
 def test_duplicate_replays_result_fn_called_once(store):
@@ -145,7 +148,7 @@ def test_failed_then_retry_same_key_reexecutes(store):
         f(idemkey="k1")
     assert f(idemkey="k1") == "recovered"
     assert len(calls) == 2
-    assert store.get("k1")["status"] == "completed"
+    assert one(store, "k1")["status"] == "completed"
 
 
 def test_failed_then_retry_with_different_args_raises(store):
@@ -177,7 +180,7 @@ def test_verify_false_raises_and_marks_failed(store):
 
     with pytest.raises(VerificationError):
         write(idemkey="k1")
-    assert store.get("k1")["status"] == "failed"
+    assert one(store, "k1")["status"] == "failed"
 
 
 def test_verify_raises_becomes_verification_error(store):
@@ -246,7 +249,8 @@ def test_concurrent_loser_sees_winner_failure(store):
 
 def test_inflight_timeout(store):
     # Simulate a wedged owner: pending row with a fresh heartbeat.
-    store.claim("stuck", "f", "fp", "default", "someone-else", claim_ttl=3600)
+    store.claim(namespaced_key("stuck", "f"), "f", fingerprint("f"), "default",
+                "someone-else", claim_ttl=3600)
 
     @guard(store=store, sleep=nosleep, inflight_timeout=0.05)
     def f():
@@ -362,7 +366,8 @@ def test_heartbeat_prevents_mid_execution_steal(store):
     t.start()
     time.sleep(0.45)  # well past claim_ttl: without heartbeat the claim is stale
     try:
-        out, _ = store.claim("lk", "slow", "fp", "default", "thief", claim_ttl=0.2)
+        out, _ = store.claim(namespaced_key("lk", "slow"), "slow", fingerprint("slow"),
+                             "default", "thief", claim_ttl=0.2)
         assert out == "inflight", f"claim was stealable mid-execution (got {out})"
     finally:
         release.set()

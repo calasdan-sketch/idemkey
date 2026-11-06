@@ -42,5 +42,53 @@
   (callers that pass no owner get the old unfenced behaviour).
 - Removed accidentally committed `__pycache__/` and `*.egg-info/` from git.
 
+### Fixed after independent panel review (still 0.2.0, unreleased)
+- **MCP registration broke under `from __future__ import annotations`**
+  (regression from the signature fix): string annotations such as a pydantic
+  model were resolved against idemkey's module. The added signature now
+  carries annotations evaluated against the tool's own module.
+- **Async cancellation could run a write twice.** A cancelled call was marked
+  `failed`, so the client's timeout-retry re-executed. It is now marked with
+  the new, non-reclaimable status **`unknown`**; a same-key retry raises
+  `OutcomeUnknownError` until `idemkey forget` (or `ttl`). Cancellation
+  during the result commit no longer loses the result: the commit is
+  shielded and completes. Cancellation before the tool starts releases the
+  claim (`failed`, safe to retry).
+- **Stale-claim takeover skipped the fingerprint check**, letting a call with
+  different arguments execute under another call's key. Takeover now requires
+  a matching fingerprint, and a mismatching call on an in-flight key fails
+  immediately with `FingerprintMismatchError` instead of after
+  `inflight_timeout`.
+- **Keys are namespaced** as `scope|tool|prefix|key`; new `key_prefix=`
+  (str or per-call callable) isolates clients sharing a store. README
+  documents the multi-client key-squatting risk. `namespace=False` keeps the
+  raw 0.1.x layout.
+- **Terminal injection via `idemkey log`:** keys containing control
+  characters or bidi overrides are rejected (`InvalidKeyError`), and `log`
+  / `stats` escape non-printable text from older rows.
+- **`purge` deleted live `pending` rows** and accepted `--older-than 0` or
+  negative values. Pending rows are now kept unless
+  `--include-stale-pending` (heartbeat older than the cutoff); non-positive,
+  NaN or infinite values are rejected.
+- **`forget` check-then-act race:** the delete itself now refuses `pending`
+  rows (`DELETE ... WHERE status != 'pending'`).
+- **`require_key=True`** now makes the key a required `str` in the signature,
+  so MCP schemas list it under `required`.
+- **Settling writes retry on `SQLITE_BUSY`** (bounded exponential backoff), so
+  a tool that succeeded is not reported as an error because another process
+  held the write lock past `busy_timeout`.
+- CI: new `mcp` job runs the MCP tests against `mcp<2` and `mcp>=2` and fails
+  if any are skipped. README's "verified" claim reworded to what is tested.
+
+### Changed (possibly breaking, review round)
+- Stored keys are namespaced. A store written by 0.1.x is not found under the
+  new layout — drain it first, or pass `namespace=False` while migrating.
+- New status `unknown` in the store and in `idemkey log --status`.
+- `DedupStore.purge()` keeps pending rows by default and raises `ValueError`
+  for non-positive ages; `DedupStore.delete()` refuses pending rows unless
+  `allow_pending=True`.
+- New: `DedupStore.find()`, `DedupStore.mark_unknown()`, `namespaced_key()`,
+  `guarded.store_key()`, `OutcomeUnknownError`.
+
 ## 0.1.1
 - Initial public release.

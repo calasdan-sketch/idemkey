@@ -17,7 +17,11 @@ Semantics (exactly what the panel approved):
   via heartbeat TTL, and every store write is fenced by a per-execution owner
   token so a stalled owner can never overwrite its successor's outcome.
 * ``async def`` tools are supported natively: the same semantics, with store
-  I/O moved off the event loop.
+  I/O moved off the event loop. A cancelled call whose write may have landed
+  is recorded as ``unknown`` and is never silently re-executed.
+* Keys are namespaced by ``(scope, tool, key_prefix)`` in the store, so the
+  same model-chosen key on two tools (or two clients, with ``key_prefix``)
+  can never collide.
 
 Honest framing: this is **at-least-once execution with exactly-once effect**
 as observed through the store. Nothing can make a network call truly
@@ -33,6 +37,7 @@ import json
 import os
 import random
 import socket
+import sys
 import threading
 import time
 import typing
@@ -116,6 +121,13 @@ class MissingKeyError(IdemKeyError):
     """``require_key=True`` and the call carried no idempotency key."""
 
 
+class OutcomeUnknownError(IdemKeyError):
+    """A previous execution under this key was interrupted mid-call (e.g. the
+    asyncio task was cancelled by a client timeout), so its write may or may
+    not have landed. idemkey refuses to guess: check the downstream system,
+    then ``idemkey forget KEY`` to allow a re-run (or set ``ttl``)."""
+
+
 class ClaimLostWarning(UserWarning):
     """This execution's claim was taken over before it could record its result.
 
@@ -127,6 +139,20 @@ class ClaimLostWarning(UserWarning):
 
 
 MAX_KEY_LENGTH = 255  # Stripe's limit; keeps keys sane for logs and the CLI
+NS_SEP = "|"  # separates scope | tool | prefix | key in the stored key
+
+# C0/C1 control characters and Unicode bidi overrides: a model-chosen key
+# containing these could rewrite an operator's terminal (``idemkey log``) or
+# visually spoof another key.
+_BIDI = set("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f")
+
+
+def _bad_char(text):
+    for ch in text:
+        o = ord(ch)
+        if o < 32 or 127 <= o < 160 or ch in _BIDI:
+            return ch
+    return None
 
 
 # -- the wrapper ----------------------------------------------------------
@@ -177,7 +203,32 @@ def _validate_key(key, key_arg):
         raise InvalidKeyError(
             f"idempotency key ({key_arg}=) is {len(key)} chars; max is {MAX_KEY_LENGTH}"
         )
+    bad = _bad_char(key)
+    if bad is not None:
+        raise InvalidKeyError(
+            f"idempotency key ({key_arg}=) contains control character {bad!r}; "
+            f"keys must be printable text"
+        )
     return key
+
+
+def _validate_ns_part(value, what):
+    if not isinstance(value, str):
+        raise InvalidKeyError(f"{what} must be a str, got {type(value).__name__}")
+    if NS_SEP in value or _bad_char(value) is not None:
+        raise InvalidKeyError(
+            f"{what} {value!r} must not contain {NS_SEP!r} or control characters"
+        )
+    return value
+
+
+def namespaced_key(key, tool, scope="default", prefix=""):
+    """The key as stored: ``scope|tool|prefix|key``.
+
+    ``scope``, ``tool`` and ``prefix`` never contain ``|`` (enforced), so the
+    split is unambiguous even though the model-chosen ``key`` may.
+    """
+    return NS_SEP.join((scope, tool, prefix, key))
 
 
 def _new_owner():
@@ -186,7 +237,43 @@ def _new_owner():
     return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
 
 
-def _with_key_param(fn, key_arg):
+def _resolved_signature(fn):
+    """``inspect.signature(fn)`` with string annotations evaluated.
+
+    Under ``from __future__ import annotations`` every annotation is a string.
+    Once we set ``__signature__`` on the wrapper, frameworks resolve those
+    strings against the *wrapper's* globals (this module), where names like a
+    user's pydantic ``Order`` model don't exist — registration then fails. So
+    resolve them here, against the tool's own module. Names that cannot be
+    resolved (e.g. ``TYPE_CHECKING``-only imports) are left as strings.
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return None
+    if sys.version_info >= (3, 10):
+        try:
+            return inspect.signature(fn, eval_str=True)
+        except Exception:  # noqa: BLE001, S110 — fall through to partial resolution
+            pass
+    target = fn if (inspect.isfunction(fn) or inspect.ismethod(fn)) else getattr(fn, "__call__", fn)  # noqa: B004
+    try:
+        hints = typing.get_type_hints(target)
+    except Exception:  # noqa: BLE001
+        hints = {}
+    if not hints:
+        return sig
+    params = [
+        p.replace(annotation=hints[p.name]) if p.name in hints else p
+        for p in sig.parameters.values()
+    ]
+    return sig.replace(
+        parameters=params,
+        return_annotation=hints.get("return", sig.return_annotation),
+    )
+
+
+def _with_key_param(fn, key_arg, required=False):
     """Signature of ``fn`` plus a keyword-only ``key_arg: Optional[str] = None``.
 
     Frameworks that build a tool schema from the signature (MCP / FastMCP,
@@ -194,17 +281,21 @@ def _with_key_param(fn, key_arg):
     not declare — so without this, the agent's ``idemkey`` never reaches the
     wrapper and dedup silently never happens.
     """
-    try:
-        sig = inspect.signature(fn)
-    except (TypeError, ValueError):
+    sig = _resolved_signature(fn)
+    if sig is None:
         return None
     params = list(sig.parameters.values())
     if key_arg in sig.parameters or not key_arg.isidentifier():
         return sig
-    new = inspect.Parameter(
-        key_arg, inspect.Parameter.KEYWORD_ONLY, default=None,
-        annotation=typing.Optional[str],
-    )
+    if required:
+        # No default: schema generators (MCP, pydantic, LangChain) mark it
+        # required, so the model is told up front it must send a key.
+        new = inspect.Parameter(key_arg, inspect.Parameter.KEYWORD_ONLY, annotation=str)
+    else:
+        new = inspect.Parameter(
+            key_arg, inspect.Parameter.KEYWORD_ONLY, default=None,
+            annotation=typing.Optional[str],
+        )
     idx = len(params)
     if params and params[-1].kind is inspect.Parameter.VAR_KEYWORD:
         idx -= 1
@@ -220,7 +311,7 @@ class _Guarded:
         self._fn = fn
         self._opts = opts
         functools.update_wrapper(self, fn)
-        sig = _with_key_param(fn, opts["key_arg"])
+        sig = _with_key_param(fn, opts["key_arg"], required=opts["require_key"])
         if sig is not None:
             self.__signature__ = sig
 
@@ -228,6 +319,17 @@ class _Guarded:
     @property
     def idemkey_options(self):
         return dict(self._opts)
+
+    def store_key(self, key):
+        """The key exactly as this wrapper stores it (namespace applied)."""
+        _validate_key(key, self._opts["key_arg"])
+        if not self._opts["namespace"]:
+            return key
+        prefix = self._opts["key_prefix"]
+        if callable(prefix):
+            prefix = prefix()
+        tool = self._opts["tool"] or getattr(self._fn, "__name__", "unknown")
+        return namespaced_key(key, tool, self._opts["scope"], prefix or "")
 
     def _prepare(self, args, kwargs):
         """Resolve (key, tool, fingerprint, call_kwargs). Shared sync/async."""
@@ -252,6 +354,14 @@ class _Guarded:
                 f"{tool}() requires an idempotency key: pass {key_arg}=<stable "
                 f"key per logical operation>. Refusing to run a keyless write."
             )
+        if key is not None and o["namespace"]:
+            prefix = o["key_prefix"]
+            if callable(prefix):
+                prefix = prefix()
+            prefix = _validate_ns_part("" if prefix is None else prefix, "key_prefix")
+            key = namespaced_key(
+                key, _validate_ns_part(tool, "tool name"), o["scope"], prefix
+            )
         return key, tool, fp, call_kwargs
 
     def __call__(self, *args, **kwargs):
@@ -269,6 +379,10 @@ class _Guarded:
         if outcome == "duplicate":
             return self._handle_duplicate(store, key, row, fp, owner, o, args, call_kwargs)
         if outcome == "inflight":
+            if row is not None:
+                # A different call wearing an in-flight (or stale) key: reject
+                # now rather than wait for — or take over — someone else's op.
+                self._check_fingerprint(key, row, fp, o["fingerprint_policy"])
             return self._handle_inflight(store, key, fp, owner, o)
         # "claimed": we own it
         return self._execute(store, key, owner, o, args, call_kwargs)
@@ -297,10 +411,21 @@ class _Guarded:
             )
         return json.loads(row["result_json"])
 
+    def _unknown_error(self, key, row):
+        return OutcomeUnknownError(
+            f"idempotency key {key!r}: a previous execution was interrupted "
+            f"mid-call ({row['error']}); its write may have landed. Check the "
+            f"downstream system, then run `idemkey forget` on this key to allow "
+            f"a re-run."
+        )
+
     def _handle_duplicate(self, store, key, row, fp, owner, o, args, kwargs):
         if row["status"] == "completed":
             self._check_fingerprint(key, row, fp, o["fingerprint_policy"])
             return self._replay(key, row)
+        if row["status"] == "unknown":
+            self._check_fingerprint(key, row, fp, o["fingerprint_policy"])
+            raise self._unknown_error(key, row)
         # status == "failed": a retry with the same key re-executes. The
         # fingerprint check guards against arg drift on the retry path too:
         # if the agent changed the args, that is not a retry, it is a new
@@ -315,6 +440,8 @@ class _Guarded:
         if row["status"] == "completed":
             self._check_fingerprint(key, row, fp, o["fingerprint_policy"])
             return self._replay(key, row)
+        if row["status"] == "unknown":
+            raise self._unknown_error(key, row)
         raise PreviousAttemptFailedError(
             f"concurrent execution of key {key!r} failed: {row['error']}"
         )
@@ -443,8 +570,17 @@ class _AsyncGuarded(_Guarded):
 
     Store calls (SQLite, may wait on a lock up to ``busy_timeout``) run in the
     default executor so the event loop is never blocked; in-flight waits poll
-    with ``asyncio.sleep``. Cancellation of the owning task marks the key
-    ``failed`` (outcome unknown, same-key retry re-executes) and re-raises.
+    with ``asyncio.sleep``.
+
+    Cancellation (e.g. an MCP client timeout cancelling the handler):
+
+    * before the tool started -> the claim is released (``failed``), since
+      nothing ran; a retry executes normally;
+    * while the tool / verify was running -> ``unknown``: the write may have
+      landed, so a same-key retry raises :class:`OutcomeUnknownError` instead
+      of executing a second time;
+    * while the result was being committed -> the commit is shielded and
+      finishes, so the retry replays the real result.
     """
 
     async def __call__(self, *args, **kwargs):
@@ -455,8 +591,9 @@ class _AsyncGuarded(_Guarded):
 
         store = o["store"] or get_default_store()
         owner = _new_owner()
-        outcome, row = await _to_thread(
-            store.claim, key, tool, fp, o["scope"], owner, o["claim_ttl"], o["ttl"]
+        outcome, row = await self._shielded_claim(
+            store.claim, store, key, owner,
+            key, tool, fp, o["scope"], owner, o["claim_ttl"], o["ttl"],
         )
         if outcome == "claimed":
             return await self._aexecute(store, key, owner, o, args, call_kwargs)
@@ -465,10 +602,33 @@ class _AsyncGuarded(_Guarded):
             self._check_fingerprint(key, row, fp, o["fingerprint_policy"])
             if row["status"] == "completed":
                 return self._replay(key, row)
-            if await _to_thread(store.reclaim_failed, key, owner):
+            if row["status"] == "unknown":
+                raise self._unknown_error(key, row)
+            won = await self._shielded_claim(store.reclaim_failed, store, key, owner, key, owner)
+            if won:
                 return await self._aexecute(store, key, owner, o, args, call_kwargs)
+        elif row is not None:
+            self._check_fingerprint(key, row, fp, o["fingerprint_policy"])
         # In flight elsewhere (or we lost the reclaim race): wait and replay.
         return await self._ahandle_inflight(store, key, fp, o)
+
+    @staticmethod
+    async def _shielded_claim(func, store, key, owner, *args):
+        """Run a claiming store call; if cancelled meanwhile, let it finish and
+        release whatever it claimed (the tool never started, so ``failed`` —
+        reclaimable — is the truthful status)."""
+        fut = _to_thread(func, *args)
+        try:
+            return await asyncio.shield(fut)
+        except asyncio.CancelledError:
+            try:
+                res = await fut
+                claimed = res[0] == "claimed" if isinstance(res, tuple) else bool(res)
+                if claimed:
+                    store.fail(key, "CancelledError: cancelled before execution", owner=owner)
+            except Exception:  # noqa: BLE001, S110
+                pass
+            raise
 
     async def _ahandle_inflight(self, store, key, fp, o, poll_interval=0.05):
         deadline = time.monotonic() + o["inflight_timeout"]
@@ -489,10 +649,14 @@ class _AsyncGuarded(_Guarded):
             return await self._arun_attempts(store, key, owner, o, args, kwargs)
         except asyncio.CancelledError:
             # Cancelled mid-flight: the write may or may not have landed.
-            # Record that (fenced) so a same-key retry re-executes instead of
-            # waiting out claim_ttl on a dead pending row.
+            # Record ``unknown`` (fenced: a no-op if the row already settled)
+            # so a same-key retry neither re-executes nor hangs on a dead
+            # pending row. Never ``failed`` — that would re-run the write.
             try:
-                self._fail(store, key, owner, "CancelledError: task cancelled; outcome unknown")
+                store.mark_unknown(
+                    key, "CancelledError: task cancelled mid-call; outcome unknown",
+                    owner=owner,
+                )
             except Exception:  # noqa: BLE001, S110
                 pass
             raise
@@ -527,7 +691,15 @@ class _AsyncGuarded(_Guarded):
                     raise await _to_thread(self._verify_failed, store, key, owner, exc) from exc
                 if not ok:
                     raise await _to_thread(self._verify_failed, store, key, owner)
-            await _to_thread(self._commit, store, key, owner, o, result)
+            commit = _to_thread(self._commit, store, key, owner, o, result)
+            try:
+                await asyncio.shield(commit)
+            except asyncio.CancelledError:
+                # The tool already succeeded: finish recording it, then honour
+                # the cancellation. The fenced mark_unknown in _aexecute is a
+                # no-op on the now-completed row.
+                await commit
+                raise
             return result
         await _to_thread(self._fail, store, key, owner, f"{type(last_exc).__name__}: {last_exc}")
         raise last_exc
@@ -555,6 +727,7 @@ def _make_wrapper(fn, opts):
     if hasattr(core, "__signature__"):
         wrapper.__signature__ = core.__signature__
     wrapper.idemkey_options = core.idemkey_options
+    wrapper.store_key = core.store_key
     return wrapper
 
 
@@ -564,6 +737,8 @@ _DEFAULTS = {
     "tool": None,
     "derive": False,
     "require_key": False,
+    "namespace": True,
+    "key_prefix": None,
     "scope": "default",
     "store": None,
     "max_retries": 3,
@@ -591,6 +766,13 @@ def guard(_fn=None, **opts):
     ``"idemkey"``), ``derive=True`` (deterministic key from scope+tool+args;
     opt-in, only for by-construction-idempotent operations),
     ``require_key=True`` (refuse keyless calls with :class:`MissingKeyError`).
+
+    Namespacing: keys are stored as ``scope|tool|prefix|key`` so the same key
+    on two tools never collides. ``key_prefix`` (a str, or a zero-arg callable
+    evaluated per call — e.g. reading the MCP session / tenant from a
+    ``contextvars.ContextVar``) isolates clients sharing one store.
+    ``namespace=False`` stores raw keys (0.1.x layout; shares keys across
+    tools — only for reading a store written by 0.1.x).
 
     Retry options: ``max_retries`` (default 3), ``backoff_base``/``backoff_cap``
     seconds with full jitter, ``retry_on`` (exception tuple; default
@@ -623,6 +805,12 @@ def guard(_fn=None, **opts):
         _validate_key(merged["key"], "key")
     if not isinstance(merged["key_arg"], str) or not merged["key_arg"]:
         raise TypeError("guard() key_arg must be a non-empty str")
+    _validate_ns_part(merged["scope"], "scope")
+    if merged["tool"] is not None:
+        _validate_ns_part(merged["tool"], "tool")
+    kp = merged["key_prefix"]
+    if kp is not None and not callable(kp):
+        _validate_ns_part(kp, "key_prefix")
     if merged["ttl"] is not None and not merged["ttl"] > 0:
         raise ValueError("guard() ttl must be a positive number of seconds or None")
 

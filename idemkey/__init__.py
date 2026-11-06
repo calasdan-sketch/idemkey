@@ -21,12 +21,14 @@ from .guard import (
     InflightTimeoutError,
     InvalidKeyError,
     MissingKeyError,
+    OutcomeUnknownError,
     PreviousAttemptFailedError,
     ResultNotReplayableError,
     RetryableError,
     VerificationError,
     get_default_store,
     guard,
+    namespaced_key,
 )
 from .keys import derive_key, fingerprint, is_derived, new_key
 from .store import DedupStore, StoreCorruptedError
@@ -42,6 +44,7 @@ __all__ = [
     "InflightTimeoutError",
     "InvalidKeyError",
     "MissingKeyError",
+    "OutcomeUnknownError",
     "PreviousAttemptFailedError",
     "ResultNotReplayableError",
     "RetryableError",
@@ -53,5 +56,6 @@ __all__ = [
     "guard",
     "is_derived",
     "mcp_tool",
+    "namespaced_key",
     "new_key",
 ]

@@ -6,6 +6,7 @@ import time
 import warnings
 
 import pytest
+from conftest import one
 
 from idemkey import (
     MAX_KEY_LENGTH,
@@ -209,7 +210,7 @@ def test_stale_owner_cannot_overwrite_successor(store):
         release.set()
         t.join(5)
     assert out["a"] == "stale"  # caller still gets its own result...
-    row = store.get("k")
+    row = one(store, "k")
     assert row["status"] == "completed"
     assert '"fresh"' in row["result_json"]  # ...but the store keeps the successor's
     assert any(issubclass(w.category, ClaimLostWarning) for w in caught)
@@ -260,7 +261,7 @@ def test_ttl_expired_key_reexecutes_and_accepts_new_args(store):
     time.sleep(0.1)
     assert tool(2, idemkey="k") == 2  # expired: brand-new operation
     assert calls == [1, 2]
-    assert store.get("k")["attempts"] == 1
+    assert one(store, "k")["attempts"] == 1
 
 
 def test_ttl_none_never_expires(store):
@@ -350,4 +351,4 @@ def test_deeply_nested_result_is_not_replayable_not_a_crash(store):
         return x
 
     tool(idemkey="deep")  # must not raise RecursionError out of the wrapper
-    assert store.get("deep")["replayable"] == 0
+    assert one(store, "deep")["replayable"] == 0
