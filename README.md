@@ -34,7 +34,7 @@ pip install idemkey
 ```
 
 No runtime dependencies (standard library only). Python 3.9+.
-(0.2.0, described here, is not on PyPI yet — install from this repo with
+(0.3.0, described here, is not on PyPI yet — install from this repo with
 `pip install .` until it is released.)
 
 ## 30-second demo
@@ -270,6 +270,69 @@ Key `guard()` options: `key`, `key_arg="idemkey"`, `tool`, `derive=False`,
 `verify=None`, `fingerprint_policy="error"`, `claim_ttl=300.0`,
 `inflight_timeout=60.0`, `ttl=None`, `result_max_bytes=1_000_000`.
 
+## Closing the exactly-once window (0.3.0)
+
+A key store alone leaves one gap: the process dies *after* the write but
+*before* the store records it, and the retry writes again. Three opt-in tools
+close it, depending on what your tool talks to:
+
+```python
+# 1. Your effect is in the same SQLite file: fully atomic.
+@guard(atomic="tx")
+def book(seat, *, tx):                 # tx = open transaction on the store DB
+    tx.execute("INSERT INTO bookings(seat) VALUES (?)", (seat,))
+
+# 2. Your API takes an idempotency key (Stripe etc.): pass a stable one.
+@guard(inject_key="idempotency_key")
+def charge(cents, *, idempotency_key): # same value on every retry/takeover
+    stripe.PaymentIntent.create(amount=cents, idempotency_key=idempotency_key)
+
+# 3. Neither: ask the world before re-running.
+@guard(reconcile=lambda order: find_order(order) or NOT_FOUND)
+def create_order(order): ...
+```
+
+Other 0.3.0 tools: `ignore=("request_id",)` / `normalize={"email": str.lower}`
+for cosmetic duplicates (10 vs 10.0, NFC/NFD text, equal dataclasses are
+merged by default), `with idemkey.run(run_id): ...` + `derive="seq"` so a
+replayed agent run reuses its keys while two intentional identical calls stay
+distinct, and `redact=` / `store_result=False` / `error_detail="type"` to keep
+PII out of the store.
+
+## Benchmark (re-run: `python bench/bench.py all`)
+
+Fault injection, 90 logical operations: attempt 1 is SIGKILLed (a third of
+the time before the effect, a third after the effect but before the library
+recorded it, a third after everything), attempt 2 is a fresh process retrying
+with the same key. 2-vCPU sandbox VM, Python 3.13, SQLite 3.53, redis-server
+for latch; one run, so treat small differences as noise
+(`bench/results.json` has the raw numbers).
+
+| | duplicate effects | lost effects | 1000 racers x 20 keys: keys with a duplicate | new keys/s | replays/s |
+|---|---|---|---|---|---|
+| no dedup (naive retry) | 67% | 0% | - | - | - |
+| idemkey 0.2 | 33% | 0% | 0 | 1076 | 21065 |
+| idemkey 0.3 default | 33% | 0% | 0 | 1721 | 21954 |
+| idemkey 0.3 `durability="normal"` | 33% | 0% | 0 | 4718 | 21430 |
+| idemkey 0.3 `reconcile=` | **0%** | 0% | 0 | 1501 | 22367 |
+| idemkey 0.3 `inject_key=` (downstream dedups) | **0%** | 0% | 0 | 1187 | 22766 |
+| idemkey 0.3 `atomic=` | **0%** | 0% | 0 | 813 | 22368 |
+| [idempotency](https://pypi.org/project/idempotency/) 0.1.0 FileStore | 33% | 0% | 0 (4 `KeyError`s) | 5366 | 51936 |
+| [latch-idempotent](https://pypi.org/project/latch-idempotent/) 0.4.1 + Redis | 33% | 0% | 0 in one run, 17 in another | 5016 | 6482 |
+
+Read it honestly: the 33% that remains is the crash-after-write window, which
+*no* key store can close alone - the three opt-in modes close it only because
+the benchmark's downstream supports the matching technique (a same-file
+transaction, a deduplicating API, a lookup). Semantic duplicates (11
+cosmetic retries of the same call, 10 genuinely different calls): 0.2 merged
+5/11 and 0 wrong; 0.3 merges 9/11 by default, 11/11 with `ignore=`/`normalize=`,
+0 wrong. The competitors were run as released and not tuned; they were not
+designed for this fault model, and the others' faster new-key rate comes from
+weaker durability (no per-key fsync). Temporal, Inngest, DBOS and Restate
+(durable-execution engines) were not run: they are servers/runtimes, not
+drop-in wrappers; their documented model is at-least-once with user-supplied
+idempotency keys for outside effects (unverified here).
+
 ## How it compares
 
 Checked 2026-11-06 against each project's own PyPI/docs page. "—" means the
@@ -300,6 +363,14 @@ timeouts and budget caps.
   call truly exactly-once. The store turns the second execution into a replay;
   if the process dies between your write and the store commit, the next retry
   re-executes. Design your tools so re-execution after a *failed* key is safe.
+- **`atomic=` only covers effects in the store's own SQLite file**, sync tools
+  only, and holds the database write lock for the tool's duration (keep it
+  short). `reconcile` and `inject_key` are only as good as the downstream's
+  lookup / dedup. `derive="seq"` assumes a deterministic replay: an LLM that
+  re-issues a *successful* call itself gets a new key, so keep passing explicit
+  keys in live agent loops.
+- **Benchmark scope**: single 2-vCPU VM, one run per cell, POSIX only
+  (`bench/bench.py` uses `fcntl`).
 - **Wall-clock TTL.** Stale-claim reclamation uses wall-clock heartbeats. An
   NTP jump forward can prematurely stale a live claim. Set `claim_ttl` above
   your max expected execution time; the wrapper heartbeats during execution to

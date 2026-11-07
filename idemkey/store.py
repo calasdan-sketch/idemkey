@@ -65,9 +65,19 @@ class StoreCorruptedError(Exception):
 
 
 class DedupStore:
-    def __init__(self, path: str):
+    def __init__(self, path: str, durability: str = "full"):
+        if durability not in ("full", "normal"):
+            raise ValueError("durability must be 'full' (default) or 'normal'")
         self.path = path
+        # "full": every claim/settle is fsynced before it returns (a power
+        # cut cannot lose a recorded key). "normal": WAL is fsynced at
+        # checkpoints only - several times faster, survives a process crash
+        # (SIGKILL) exactly as well, but the last few records can be lost on
+        # power failure/OS crash, which re-opens the duplicate window.
+        self.durability = durability
         self._lock = threading.Lock()
+        self._settled_cv = threading.Condition()
+        self._settle_seq = 0
         self._conn = None
         self._pid = None
         self._closed = False
@@ -111,6 +121,8 @@ class DedupStore:
             if self.path != ":memory:":
                 conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA busy_timeout=5000;")
+            if self.durability == "normal" and self.path != ":memory:":
+                conn.execute("PRAGMA synchronous=NORMAL;")
             conn.executescript(SCHEMA)
             conn.commit()
         except sqlite3.DatabaseError as exc:
@@ -171,7 +183,25 @@ class DedupStore:
         return out
 
     # -- claim protocol ----------------------------------------------------
-    def claim(self, key, tool, fingerprint, scope, owner, claim_ttl, ttl=None):
+    def claim(self, key, tool, fingerprint, scope, owner, claim_ttl, ttl=None, alt_fingerprints=()):
+        """:meth:`_claim` retried on transient SQLITE_BUSY (many racing
+        processes can outlast ``busy_timeout``; a claim is idempotent to
+        retry because every statement in it is atomic and re-checks state)."""
+        for attempt in range(WRITE_RETRIES):
+            try:
+                return self._claim(key, tool, fingerprint, scope, owner, claim_ttl, ttl, alt_fingerprints)
+            except sqlite3.OperationalError as exc:
+                if not _is_busy(exc) or attempt == WRITE_RETRIES - 1:
+                    raise
+                with self._lock:
+                    try:
+                        self._conn.rollback()
+                    except Exception:  # noqa: BLE001, S110
+                        pass
+                time.sleep(WRITE_RETRY_BASE * (2 ** attempt))
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def _claim(self, key, tool, fingerprint, scope, owner, claim_ttl, ttl=None, alt_fingerprints=()):
         """Try to claim key for execution.
 
         Returns ``(outcome, row)`` where outcome is one of:
@@ -237,8 +267,8 @@ class DedupStore:
                        SET owner = ?, heartbeat = ?, updated_at = ?,
                            attempts = attempts + 1
                        WHERE key = ? AND status = 'pending' AND heartbeat <= ?
-                         AND fingerprint = ?""",
-                    (owner, now, now, key, now - claim_ttl, fingerprint),
+                         AND fingerprint IN (""" + ",".join("?" * (1 + len(alt_fingerprints))) + ")",
+                    (owner, now, now, key, now - claim_ttl, fingerprint, *alt_fingerprints),
                 )
                 self._conn.commit()
                 if cur.rowcount == 1:
@@ -247,6 +277,12 @@ class DedupStore:
 
     def reclaim_failed(self, key, owner):
         """Take over a failed row for a retry. Atomic; exactly one winner."""
+        return self.reclaim(key, owner, "failed")
+
+    def reclaim(self, key, owner, from_status):
+        """Take over a ``failed`` or ``unknown`` row. Atomic; one winner."""
+        if from_status not in ("failed", "unknown"):
+            raise ValueError("can only reclaim failed or unknown rows")
         now = time.time()
         with self._lock:
             self._ensure_open()
@@ -254,8 +290,8 @@ class DedupStore:
                 """UPDATE idem_keys
                    SET status = 'pending', owner = ?, heartbeat = ?,
                        updated_at = ?, attempts = attempts + 1, error = NULL
-                   WHERE key = ? AND status = 'failed'""",
-                (owner, now, now, key),
+                   WHERE key = ? AND status = ?""",
+                (owner, now, now, key, from_status),
             )
             self._conn.commit()
             return cur.rowcount == 1
@@ -282,6 +318,7 @@ class DedupStore:
                     self._ensure_open()
                     cur = self._exec(sql, full)
                     self._conn.commit()
+                    self._notify_settled()
                     return cur.rowcount == 1
             except sqlite3.OperationalError as exc:
                 if not _is_busy(exc) or attempt == WRITE_RETRIES - 1:
@@ -292,6 +329,11 @@ class DedupStore:
                     pass
                 time.sleep(WRITE_RETRY_BASE * (2 ** attempt))
         return False  # pragma: no cover
+
+    def _notify_settled(self):
+        with self._settled_cv:
+            self._settle_seq += 1
+            self._settled_cv.notify_all()
 
     def _exec(self, sql, params):
         # Single seam for writes (lets tests inject SQLITE_BUSY).
@@ -354,24 +396,100 @@ class DedupStore:
                     "DELETE FROM idem_keys WHERE key = ? AND status != 'pending'", (key,)
                 )
             self._conn.commit()
+            self._notify_settled()
             return cur.rowcount == 1
 
     def wait_until_settled(self, key, timeout, poll_interval=0.05):
         """Block until the row leaves 'pending'. Returns the settled row.
 
+        Same-process waiters are woken the instant the owner settles (no
+        polling latency); waiters in *other* processes poll with a backoff
+        from 2 ms up to ``poll_interval``.
+
         Raises ``TimeoutError`` on timeout, ``KeyError`` if the row vanished
         (e.g. purged mid-wait).
         """
         deadline = time.monotonic() + timeout
+        delay = min(0.002, poll_interval)
         while True:
+            with self._settled_cv:
+                seq = self._settle_seq
             row = self.get(key)
             if row is None:
                 raise KeyError(f"idempotency key {key!r} vanished while waiting")
             if row["status"] != "pending":
                 return row
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise TimeoutError(f"timed out waiting for key {key!r} to settle")
-            time.sleep(poll_interval)
+            with self._settled_cv:
+                if self._settle_seq == seq:  # nothing settled since we looked
+                    self._settled_cv.wait(min(delay, remaining))
+            delay = min(delay * 2, poll_interval)
+
+    # -- atomic (transactional) execution ---------------------------------
+    def begin_atomic(self):
+        """Open a dedicated connection with a write transaction (BEGIN
+        IMMEDIATE) for :func:`idemkey.guard`'s ``atomic=`` mode.
+
+        The tool's own writes (to tables in this same database file) and the
+        key's ``completed`` record are committed by ONE ``COMMIT`` in
+        :meth:`commit_atomic`, so a crash leaves both or neither.
+        """
+        if self.path == ":memory:":
+            raise ValueError("atomic mode needs a file-backed store, not ':memory:'")
+        with self._lock:
+            self._ensure_open()
+        conn = sqlite3.connect(self.path, timeout=10.0, isolation_level=None,
+                               check_same_thread=False)
+        try:
+            conn.execute("PRAGMA busy_timeout=10000;")
+            if self.durability == "normal":
+                conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("BEGIN IMMEDIATE")
+        except BaseException:
+            conn.close()
+            raise
+        return conn
+
+    def commit_atomic(self, conn, key, owner, result_json, replayable=True):
+        """Record ``completed`` inside ``conn``'s transaction and COMMIT.
+
+        Fenced: if this execution no longer owns a pending claim, the whole
+        transaction (including the tool's own writes) is rolled back and
+        ``False`` is returned - a stale owner's effect is undone, not kept.
+        """
+        try:
+            now = time.time()
+            cur = conn.execute(
+                """UPDATE idem_keys
+                   SET status = 'completed', result_json = ?, replayable = ?,
+                       error = NULL, updated_at = ?, heartbeat = ?
+                   WHERE key = ? AND owner = ? AND status = 'pending'""",
+                (result_json, 1 if replayable else 0, now, now, key, owner),
+            )
+            if cur.rowcount != 1:
+                conn.execute("ROLLBACK")
+                return False
+            conn.execute("COMMIT")
+        except BaseException:
+            self.rollback_atomic(conn)
+            raise
+        finally:
+            conn.close()
+        self._notify_settled()
+        return True
+
+    @staticmethod
+    def rollback_atomic(conn):
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:  # noqa: BLE001, S110
+            pass
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
 
     # -- maintenance --------------------------------------------------------
     def purge(self, older_than_seconds=DEFAULT_TTL_SECONDS, include_stale_pending=False):

@@ -1,0 +1,516 @@
+{
+  "python": "3.13.18",
+  "sqlite": "3.53.1",
+  "cpus": 2,
+  "crash": {
+    "naive": {
+      "ops": 90,
+      "before_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_effect": {
+        "ops": 30,
+        "duplicate": 30,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_commit": {
+        "ops": 30,
+        "duplicate": 30,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "duplicate_rate": 0.6667,
+      "lost_rate": 0.0
+    },
+    "idemkey-legacy": {
+      "ops": 90,
+      "before_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_effect": {
+        "ops": 30,
+        "duplicate": 30,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_commit": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "duplicate_rate": 0.3333,
+      "lost_rate": 0.0
+    },
+    "idemkey:default": {
+      "ops": 90,
+      "before_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_effect": {
+        "ops": 30,
+        "duplicate": 30,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_commit": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "duplicate_rate": 0.3333,
+      "lost_rate": 0.0
+    },
+    "idemkey:fast": {
+      "ops": 90,
+      "before_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_effect": {
+        "ops": 30,
+        "duplicate": 30,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_commit": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "duplicate_rate": 0.3333,
+      "lost_rate": 0.0
+    },
+    "idemkey:reconcile": {
+      "ops": 90,
+      "before_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_commit": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "duplicate_rate": 0.0,
+      "lost_rate": 0.0
+    },
+    "idemkey:inject": {
+      "ops": 90,
+      "before_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_commit": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "duplicate_rate": 0.0,
+      "lost_rate": 0.0
+    },
+    "idemkey:atomic": {
+      "ops": 90,
+      "before_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_commit": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "duplicate_rate": 0.0,
+      "lost_rate": 0.0
+    },
+    "idempotency-filestore": {
+      "ops": 90,
+      "before_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_effect": {
+        "ops": 30,
+        "duplicate": 30,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_commit": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "duplicate_rate": 0.3333,
+      "lost_rate": 0.0
+    },
+    "latch-redis": {
+      "ops": 90,
+      "before_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_effect": {
+        "ops": 30,
+        "duplicate": 30,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_commit": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "duplicate_rate": 0.3333,
+      "lost_rate": 0.0
+    }
+  },
+  "race": {
+    "idemkey-legacy": {
+      "racers": 1000,
+      "keys": 20,
+      "keys_with_duplicate_effect": 0,
+      "keys_never_executed": 0,
+      "extra_effects": 0,
+      "errors": {},
+      "p50_ms": 155.2,
+      "p99_ms": 216.1,
+      "wall_s": 0.34
+    },
+    "idemkey:default": {
+      "racers": 1000,
+      "keys": 20,
+      "keys_with_duplicate_effect": 0,
+      "keys_never_executed": 0,
+      "extra_effects": 0,
+      "errors": {},
+      "p50_ms": 116.4,
+      "p99_ms": 203.0,
+      "wall_s": 0.27
+    },
+    "idemkey:fast": {
+      "racers": 1000,
+      "keys": 20,
+      "keys_with_duplicate_effect": 0,
+      "keys_never_executed": 0,
+      "extra_effects": 0,
+      "errors": {},
+      "p50_ms": 104.3,
+      "p99_ms": 215.3,
+      "wall_s": 0.3
+    },
+    "idemkey:reconcile": {
+      "racers": 1000,
+      "keys": 20,
+      "keys_with_duplicate_effect": 0,
+      "keys_never_executed": 0,
+      "extra_effects": 0,
+      "errors": {},
+      "p50_ms": 104.1,
+      "p99_ms": 217.8,
+      "wall_s": 0.31
+    },
+    "idemkey:inject": {
+      "racers": 1000,
+      "keys": 20,
+      "keys_with_duplicate_effect": 0,
+      "keys_never_executed": 0,
+      "extra_effects": 0,
+      "errors": {},
+      "p50_ms": 129.4,
+      "p99_ms": 240.3,
+      "wall_s": 0.33
+    },
+    "idemkey:atomic": {
+      "racers": 1000,
+      "keys": 20,
+      "keys_with_duplicate_effect": 0,
+      "keys_never_executed": 0,
+      "extra_effects": 0,
+      "errors": {},
+      "p50_ms": 154.3,
+      "p99_ms": 235.4,
+      "wall_s": 0.37
+    },
+    "idempotency-filestore": {
+      "racers": 1000,
+      "keys": 20,
+      "keys_with_duplicate_effect": 0,
+      "keys_never_executed": 0,
+      "extra_effects": 0,
+      "errors": {
+        "KeyError": 4
+      },
+      "p50_ms": 64.0,
+      "p99_ms": 180.3,
+      "wall_s": 0.31
+    },
+    "latch-redis": {
+      "racers": 1000,
+      "keys": 20,
+      "keys_with_duplicate_effect": 17,
+      "keys_never_executed": 0,
+      "extra_effects": 17,
+      "errors": {},
+      "p50_ms": 131.1,
+      "p99_ms": 199.0,
+      "wall_s": 0.39
+    }
+  },
+  "speed": {
+    "idemkey-legacy": {
+      "new_keys_per_s": 1076,
+      "replays_per_s": 21065,
+      "threads8_new_keys_per_s": 1190
+    },
+    "idemkey:default": {
+      "new_keys_per_s": 1721,
+      "replays_per_s": 21954,
+      "threads8_new_keys_per_s": 1218
+    },
+    "idemkey:fast": {
+      "new_keys_per_s": 4718,
+      "replays_per_s": 21430,
+      "threads8_new_keys_per_s": 2888
+    },
+    "idemkey:reconcile": {
+      "new_keys_per_s": 1501,
+      "replays_per_s": 22367,
+      "threads8_new_keys_per_s": 1081
+    },
+    "idemkey:inject": {
+      "new_keys_per_s": 1187,
+      "replays_per_s": 22766,
+      "threads8_new_keys_per_s": 991
+    },
+    "idemkey:atomic": {
+      "new_keys_per_s": 813,
+      "replays_per_s": 22368,
+      "threads8_new_keys_per_s": 608
+    },
+    "idempotency-filestore": {
+      "new_keys_per_s": 5366,
+      "replays_per_s": 51936,
+      "threads8_new_keys_per_s": 1437
+    },
+    "latch-redis": {
+      "new_keys_per_s": 5016,
+      "replays_per_s": 6482,
+      "threads8_new_keys_per_s": 2397
+    }
+  },
+  "semantic": {
+    "idemkey-legacy": {
+      "merged_default": 5,
+      "merged_configured": 5,
+      "same_total": 11,
+      "wrongly_merged": 0,
+      "diff_total": 10,
+      "detail": {
+        "int vs float 10/10.0": {
+          "default": false,
+          "configured": false
+        },
+        "int vs Decimal('10.00')": {
+          "default": false,
+          "configured": false
+        },
+        "NFC vs NFD unicode": {
+          "default": false,
+          "configured": false
+        },
+        "positional vs keyword spelling": {
+          "default": true,
+          "configured": true
+        },
+        "dict key order": {
+          "default": true,
+          "configured": true
+        },
+        "set order": {
+          "default": true,
+          "configured": true
+        },
+        "equal dataclass instances": {
+          "default": true,
+          "configured": true
+        },
+        "equal plain-object instances": {
+          "default": false,
+          "configured": false
+        },
+        "equal namedtuples": {
+          "default": true,
+          "configured": true
+        },
+        "fresh request_id per retry": {
+          "default": false,
+          "configured": false
+        },
+        "email case/whitespace": {
+          "default": false,
+          "configured": false
+        },
+        "10 vs 11": {
+          "wrongly_merged": false
+        },
+        "'10' vs 10": {
+          "wrongly_merged": false
+        },
+        "True vs 1": {
+          "wrongly_merged": false
+        },
+        "0.1 vs Decimal('0.1')": {
+          "wrongly_merged": false
+        },
+        "memo 'a' vs 'A'": {
+          "wrongly_merged": false
+        },
+        "[1,2] vs [2,1]": {
+          "wrongly_merged": false
+        },
+        "None vs ''": {
+          "wrongly_merged": false
+        },
+        "objects, different state": {
+          "wrongly_merged": false
+        },
+        "dataclasses, different state": {
+          "wrongly_merged": false
+        },
+        "request_id differs, NOT ignored": {
+          "wrongly_merged": false
+        }
+      }
+    },
+    "idemkey": {
+      "merged_default": 9,
+      "merged_configured": 11,
+      "same_total": 11,
+      "wrongly_merged": 0,
+      "diff_total": 10,
+      "detail": {
+        "int vs float 10/10.0": {
+          "default": true,
+          "configured": true
+        },
+        "int vs Decimal('10.00')": {
+          "default": true,
+          "configured": true
+        },
+        "NFC vs NFD unicode": {
+          "default": true,
+          "configured": true
+        },
+        "positional vs keyword spelling": {
+          "default": true,
+          "configured": true
+        },
+        "dict key order": {
+          "default": true,
+          "configured": true
+        },
+        "set order": {
+          "default": true,
+          "configured": true
+        },
+        "equal dataclass instances": {
+          "default": true,
+          "configured": true
+        },
+        "equal plain-object instances": {
+          "default": true,
+          "configured": true
+        },
+        "equal namedtuples": {
+          "default": true,
+          "configured": true
+        },
+        "fresh request_id per retry": {
+          "default": false,
+          "configured": true
+        },
+        "email case/whitespace": {
+          "default": false,
+          "configured": true
+        },
+        "10 vs 11": {
+          "wrongly_merged": false
+        },
+        "'10' vs 10": {
+          "wrongly_merged": false
+        },
+        "True vs 1": {
+          "wrongly_merged": false
+        },
+        "0.1 vs Decimal('0.1')": {
+          "wrongly_merged": false
+        },
+        "memo 'a' vs 'A'": {
+          "wrongly_merged": false
+        },
+        "[1,2] vs [2,1]": {
+          "wrongly_merged": false
+        },
+        "None vs ''": {
+          "wrongly_merged": false
+        },
+        "objects, different state": {
+          "wrongly_merged": false
+        },
+        "dataclasses, different state": {
+          "wrongly_merged": false
+        },
+        "request_id differs, NOT ignored": {
+          "wrongly_merged": false
+        }
+      }
+    }
+  }
+}

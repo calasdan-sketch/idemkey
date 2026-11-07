@@ -1,6 +1,53 @@
 # Changelog
 
-## 0.2.0 — unreleased
+## 0.3.0 - unreleased
+
+Theme: close the "exactly-once illusion" window and make duplicates
+measurable. Everything below is backward compatible (existing options,
+stored rows and fingerprints keep working).
+
+### Added
+- **`atomic="tx"`** - the tool receives a sqlite3 connection in an open
+  transaction on the store's database; its writes and the key's `completed`
+  record commit in ONE `COMMIT`. Crash (SIGKILL) at any point = both or
+  neither; a stale owner's transaction is rolled back. Sync tools, effects in
+  the same SQLite file only.
+- **`inject_key="idempotency_key"`** - hands the tool a stable downstream key
+  (`idk_...`, a hash of the stored key; identical across retries and takeover)
+  for Stripe-style `Idempotency-Key` APIs. The parameter is hidden from the
+  tool schema.
+- **`reconcile=fn(*args)`** - asked before any re-execution (stale takeover,
+  retry after failure, `unknown` outcome): return the earlier attempt's result
+  or `idemkey.NOT_FOUND`. Resolves `unknown` keys automatically; if the hook
+  raises, the key is marked `unknown` (fail closed, `ReconcileError`).
+- **Semantic fingerprints**: `10 == 10.0 == Decimal("10.00")`, NFC/NFD text,
+  dataclasses / namedtuples / pydantic models / plain objects compared by
+  content (not by a `repr()` with a memory address), cyclic arguments safe.
+  `ignore=("request_id",)` and `normalize={"email": str.lower}` for volatile or
+  cosmetic arguments. `derive="semantic"` derives a key from them. Stored
+  v1 fingerprints still match (no re-execution after upgrading).
+- **`derive="seq"` + `with idemkey.run(run_id):`** - run-scoped sequence keys:
+  replaying a crashed run maps the Nth identical call to the same key (steps
+  already done replay from the store) while two intentional identical calls in
+  one run stay distinct. The counter advances only on success.
+- **Privacy**: `redact=fn(result)`, `store_result=False`, `error_detail="type"`.
+- `DedupStore(path, durability="normal")` - WAL-only fsync, ~4x more new-key
+  throughput; survives process crashes, can lose the last records on power loss.
+- `bench/bench.py` - committed fault-injection / 1000-racer / speed /
+  semantic benchmark with competitors (see README), results in
+  `bench/results.json`.
+
+### Changed
+- One shared heartbeat thread instead of one thread per call.
+- Same-process waiters are woken on settle (no 50 ms poll); other processes
+  poll with backoff from 2 ms.
+- `claim()` retries transient `SQLITE_BUSY` like the settle writes already did.
+- Fingerprinting refuses (ValueError) arguments nested too deeply to encode
+  instead of crashing with `RecursionError`; v1 hit that on cyclic arguments.
+- New exports: `NOT_FOUND`, `ClaimLostError`, `ReconcileError`, `run`,
+  `downstream_key`, `fingerprint2`.
+
+## 0.2.0 - unreleased
 
 ### Fixed
 - **MCP / LangChain tools never received the key.** The wrapper's signature
