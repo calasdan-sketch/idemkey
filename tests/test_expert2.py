@@ -639,7 +639,7 @@ def test_inprocess_waiters_wake_immediately(store):
 
     def waiter():
         t0 = time.perf_counter()
-        store.wait_until_settled("K", 5, poll_interval=1.0)
+        store.wait_until_settled("K", 10, poll_interval=5.0)
         got.append(time.perf_counter() - t0)
 
     th = threading.Thread(target=waiter)
@@ -647,7 +647,7 @@ def test_inprocess_waiters_wake_immediately(store):
     time.sleep(0.1)
     store.complete("K", "{}", owner="o")
     th.join()
-    assert got and got[0] < 0.4          # woke on notify, not after the 1 s poll
+    assert got and got[0] < 2.5          # woke on notify, not after the 5 s poll (slack for a loaded CI box)
 
 
 def test_claim_retries_transient_busy(store):

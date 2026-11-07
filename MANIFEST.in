@@ -1,0 +1,4 @@
+include LICENSE CHANGELOG.md README.md
+recursive-include tests *.py
+recursive-include bench *.py *.json
+prune .github

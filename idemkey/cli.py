@@ -6,7 +6,13 @@
     idemkey stats [--store PATH]
     idemkey forget KEY [--store PATH]
     idemkey export [--store PATH] [--status S] [--no-results]    (JSON lines)
-    idemkey doctor [--store PATH] [--claim-ttl SECONDS]          (exit 1 if attention needed)
+    idemkey doctor [--store PATH] [--claim-ttl SECONDS] [--json] (exit 1 if attention needed)
+    idemkey demo                                                 (30-second self-check, temp store)
+    idemkey --version
+
+Exit codes: 0 ok, 1 error / not found / doctor found something, 2 refused
+(pending key) or bad usage, 3 ambiguous key. Data goes to stdout, messages
+and errors to stderr; no command prints a Python traceback for a user error.
 """
 
 from __future__ import annotations
@@ -14,11 +20,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
+import tempfile
 import time
 
 from .guard import DEFAULT_STORE_ENV, DEFAULT_STORE_PATH
-from .store import DedupStore
+from .store import DedupStore, StoreCorruptedError
 
 
 def _store_path(path_arg):
@@ -52,17 +60,22 @@ def _safe(text):
 def _lookup(store, key):
     rows = store.find(key)
     if not rows:
-        print(f"key {key!r} not found", file=sys.stderr)
+        print(f"key {_q(key)} not found", file=sys.stderr)
         raise SystemExit(1)
     if len(rows) > 1:
         print(
-            f"key {key!r} exists in {len(rows)} namespaces; pass the full stored key:",
+            f"key {_q(key)} exists in {len(rows)} namespaces; pass the full stored key:",
             file=sys.stderr,
         )
         for r in rows:
             print(f"  {_safe(r['key'])}", file=sys.stderr)
         raise SystemExit(3)
     return rows[0]
+
+
+def _q(key):
+    """A key for an error message: escaped, quoted and bounded in length."""
+    return "'" + _mid(_safe(key), 80) + "'"
 
 
 def _positive_int(text):
@@ -138,7 +151,11 @@ def cmd_purge(args):
     n = store.purge(
         older_than_seconds=args.older_than * 3600,
         include_stale_pending=args.include_stale_pending,
+        dry_run=args.dry_run,
     )
+    if args.dry_run:
+        print(f"dry run: {n} entr{'y' if n == 1 else 'ies'} older than {args.older_than}h would be purged; nothing deleted")
+        return
     extra = " (incl. stale pending)" if args.include_stale_pending else " (pending rows kept)"
     print(f"purged {n} entr{'y' if n == 1 else 'ies'} older than {args.older_than}h{extra}")
 
@@ -146,6 +163,10 @@ def cmd_purge(args):
 def cmd_export(args):
     """One JSON object per line (ensure_ascii: control/bidi characters escaped)."""
     store = _resolve_store(args.store)
+    try:
+        sys.stdout.reconfigure(newline="\n")   # JSON lines: LF even on Windows
+    except Exception:  # noqa: BLE001, S110 - not a real text stream (tests, pipes)
+        pass
     n = 0
     for r in store.iter_rows(status=args.status):
         sys.stdout.write(json.dumps(_row_json(r, results=not args.no_results)) + "\n")
@@ -191,6 +212,12 @@ def cmd_doctor(args):
         problems.append(f"store file was readable by other users (mode {oct(mode_before)}); it holds tool "
                         f"results in plaintext. Opening it just now tightened it to 0600 - check the directory too")
     st = store.stats()
+    if args.json:
+        print(json.dumps({"path": st["path"], "keys": st["total"], "ok": not problems,
+                          "problems": problems, "notes": notes}))
+        if problems:
+            raise SystemExit(1)
+        return
     print(f"store: {_safe(st['path'])}  keys: {st['total']}")
     for line in problems:
         print(f"ATTENTION: {_safe(line)}")
@@ -209,14 +236,14 @@ def cmd_forget(args):
     # 'pending'), so a row reclaimed between lookup and delete is never removed
     # out from under a running execution.
     if store.delete(row["key"], allow_pending=args.force):
-        print(f"forgot {_safe(repr(args.key))} (was {row['status']}); its next use will execute again")
+        print(f"forgot {_q(args.key)} (was {row['status']}); its next use will execute again")
         return
     now = store.get(row["key"])
     if now is None:
-        print(f"key {args.key!r} not found", file=sys.stderr)
+        print(f"key {_q(args.key)} not found", file=sys.stderr)
         raise SystemExit(1)
     print(
-        f"key {args.key!r} is pending (an execution may be in flight). "
+        f"key {_q(args.key)} is pending (an execution may be in flight). "
         f"Re-run with --force only if you are sure its owner is dead.",
         file=sys.stderr,
     )
@@ -226,6 +253,9 @@ def cmd_forget(args):
 def cmd_stats(args):
     store = _resolve_store(args.store)
     s = store.stats()
+    if args.json:
+        print(json.dumps(s))
+        return
     print(f"store: {_safe(s['path'])}")
     print(f"total keys: {s['total']}")
     for status, n in sorted(s["by_status"].items()):
@@ -235,6 +265,7 @@ def cmd_stats(args):
 def build_parser():
     p = argparse.ArgumentParser(prog="idemkey", description="Inspect the idemkey dedup store.")
     p.add_argument("--store", default=None, help="path to the SQLite store")
+    p.add_argument("--version", action="version", version=f"idemkey {_version()}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pl = sub.add_parser("log", help="list recent key entries")
@@ -253,6 +284,7 @@ def build_parser():
         "--include-stale-pending", action="store_true",
         help="also delete pending rows whose heartbeat is older than the cutoff",
     )
+    pp.add_argument("--dry-run", action="store_true", help="count what would be purged, delete nothing")
     pp.set_defaults(func=cmd_purge)
 
     pf = sub.add_parser(
@@ -269,14 +301,64 @@ def build_parser():
 
     pd = sub.add_parser("doctor", help="check for stuck/unknown keys and a loose file mode")
     pd.add_argument("--claim-ttl", type=float, default=300.0, help="seconds without heartbeat = dead owner")
+    pd.add_argument("--json", action="store_true", help="machine-readable result (exit code unchanged)")
     pd.set_defaults(func=cmd_doctor)
 
     pt = sub.add_parser("stats", help="store statistics")
+    pt.add_argument("--json", action="store_true", help="machine-readable output")
     pt.set_defaults(func=cmd_stats)
+
+    pm = sub.add_parser("demo", help="30-second self-check: a retried 'charge' runs once (temp store)")
+    pm.set_defaults(func=cmd_demo)
     return p
 
 
+def _version():
+    from . import __version__
+    return __version__
+
+
+def cmd_demo(args):
+    """Prove the install works: a charge that is retried with the same key runs once."""
+    from .guard import MissingKeyError, guard
+
+    with tempfile.TemporaryDirectory(prefix="idemkey-demo-") as tmp:
+        store = DedupStore(os.path.join(tmp, "demo.db"))
+        charges = []
+
+        @guard(store=store, require_key=True, sleep=lambda s: None)
+        def charge(customer, cents):
+            charges.append(cents)
+            return {"charge_id": f"ch_{len(charges)}", "cents": cents}
+
+        first = charge("cus_42", 5000, idemkey="order-7f3a")
+        again = charge("cus_42", 5000, idemkey="order-7f3a")
+        refused = False
+        try:
+            charge("cus_42", 5000)
+        except MissingKeyError:
+            refused = True
+        store.close()
+    ok = first == again and len(charges) == 1 and refused
+    print(f"same key twice -> {len(charges)} charge(s) made, same result replayed: {first == again}")
+    print(f"call with no key -> refused: {refused}")
+    print("idemkey works on this machine." if ok else "SOMETHING IS WRONG: please report this.")
+    if not ok:
+        raise SystemExit(1)
+
+
+def _console_safe():
+    """A non-UTF-8 console (cp1252, ASCII, C locale) must not crash the CLI on
+    a stored key containing other characters: write them as \\uXXXX instead."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except Exception:  # noqa: BLE001, S110 - captured / replaced stream
+            pass
+
+
 def main(argv=None):
+    _console_safe()
     args = build_parser().parse_args(argv)
     try:
         args.func(args)
@@ -286,6 +368,9 @@ def main(argv=None):
         except OSError:
             pass
         raise SystemExit(0) from None
+    except (StoreCorruptedError, sqlite3.Error, OSError) as exc:
+        print(f"idemkey: {_safe(exc)}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

@@ -34,8 +34,16 @@ pip install idemkey
 ```
 
 No runtime dependencies (standard library only). Python 3.9+.
-(0.3.0, described here, is not on PyPI yet — install from this repo with
-`pip install .` until it is released.)
+PyPI currently has 0.1.1 only. This README describes 0.3.0 (unreleased): until
+it is released, install it from a checkout of this repo with `pip install .`,
+and read *Upgrading from 0.1.1* in the CHANGELOG first.
+
+Check the install worked:
+
+```bash
+idemkey --version     # idemkey 0.3.0
+idemkey demo          # a retried "charge" runs once; a keyless call is refused
+```
 
 ## 30-second demo
 
@@ -277,6 +285,10 @@ idemkey log --status failed --limit 20   # recent entries
 idemkey log --json                       # same, machine-readable (no results)
 idemkey export --no-results > audit.jsonl  # every row as JSON lines
 idemkey doctor                           # unknown / stale-pending keys, loose file mode; exit 1 = look at it
+idemkey doctor --json                    # same, machine-readable (same exit code)
+idemkey stats --json
+idemkey purge --older-than 24 --dry-run  # count what would go, delete nothing
+idemkey demo                             # 30-second self-check in a temporary store
 idemkey show order-7f3a                  # full row incl. replayed result
 idemkey stats                            # counts by status
 idemkey purge --older-than 24            # delete entries older than 24h (default TTL)
@@ -293,6 +305,13 @@ model-chosen key can't rewrite your terminal.
 
 Store location: `--store PATH`, or `IDEMKEY_STORE` env, or
 `~/.idemkey/store.db`. (`python -m idemkey` works too.)
+
+Exit codes: 0 ok; 1 error, key not found, or `doctor` found something; 2 bad
+usage or a `pending` key refused by `forget`; 3 the key exists in several
+namespaces. Data goes to stdout, messages and errors to stderr. A corrupt or
+unopenable store prints `idemkey: <reason>`, never a traceback. On a console
+that cannot show a character in a stored key (ASCII, Windows cp1252) it is
+written as `\uXXXX`.
 
 ### API reference
 
@@ -352,7 +371,9 @@ recorded it, a third after everything), attempt 2 is a fresh process retrying
 with the same key. 2-vCPU sandbox VM, Python 3.13, SQLite 3.53, redis-server
 for latch; one run, **on a VM shared with other jobs (load average 3-10 while it
 ran), so the speed columns are noisy** - the same code measured 1721 new keys/s
-in the previous round's run and 996 in this one. Raw numbers: `bench/results.json`.
+in the previous round's run and 996 in this one. Raw numbers: `bench/results.json` (round 3, with competitors); a round-4 re-run of
+the idemkey rows only is `bench/results-round4.json` - same correctness numbers, speed
+columns not comparable (see `docs/ROUND4.md`).
 
 | | duplicate effects | lost effects | 1000 racers x 20 keys: keys with a duplicate | new keys/s | replays/s |
 |---|---|---|---|---|---|
@@ -468,9 +489,16 @@ the three ways of closing the crash-after-write window.
 - **Long text and bytes are fingerprinted by digest** (above 4096 characters),
   numbers exactly, but other exotic types by `repr()` with addresses scrubbed:
   two different lambdas or generators share a fingerprint.
-- **Tested on CPython 3.13 on Linux only.** The code parses as Python 3.9, and CI
-  is configured for Linux/macOS/Windows and 3.9-3.13, but that matrix was not run
-  for this round; Windows paths and file modes are untested here.
+- **Tested on Linux only.** Round 4 ran the test suite from a freshly built
+  wheel on CPython 3.9, 3.10, 3.11, 3.12 and 3.13 (see `docs/ROUND4.md` for
+  the numbers). macOS and Windows have never been run: CI is configured for
+  them, and Windows was reviewed by reading the code only (file modes are
+  POSIX-only and skipped there, the CLI no longer crashes on a cp1252 console),
+  but nobody has watched it work.
+- **Windows: file privacy is not enforced.** The `0600` / `0700` modes are
+  POSIX-only; on Windows the store file gets whatever access the folder it lives
+  in gives, so keep it in your user profile. `idemkey doctor` skips the mode check
+  there.
 - **`idemkey export` includes the claim owner (host name and pid)** and, unless you
   pass `--no-results`, the stored results.
 - **Derived keys dedup across processes** sharing a store when (scope, tool,
@@ -486,7 +514,8 @@ the three ways of closing the crash-after-write window.
   operator can still loosen that afterwards, so treat the store as sensitive.
 - **Fork-safe.** A `DedupStore` opened before `os.fork()` reconnects
   transparently in the child — SQLite connections are never shared across a
-  fork. Threads share the one connection behind a lock, as before.
+  fork, and (since round 4) the store's locks are replaced in the child, so a
+  fork taken while the heartbeat thread held one no longer hangs the child. Threads share the one connection behind a lock, as before.
 - **Async store I/O uses the default thread pool.** Fine for typical agent
   loads; very high-concurrency services sharing one SQLite file will be
   limited by SQLite's single writer.

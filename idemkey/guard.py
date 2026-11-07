@@ -602,11 +602,30 @@ class _Guarded:
         if key is not None:
             _validate_key(key, key_arg)
         tool = o["tool"] or getattr(self._fn, "__name__", "unknown")
+        cargs = ckwargs = fp = None
+        if key is None and not o["derive"]:
+            # Keyless call: it runs once, with no store and no retry, so the
+            # arguments are never fingerprinted. (They used to be, so an
+            # argument whose repr() raises stopped a call that has no dedup.)
+            if o["require_key"]:
+                raise MissingKeyError(
+                    f"{tool}() requires an idempotency key: pass {key_arg}=<stable "
+                    f"key per logical operation>. Refusing to run a keyless write."
+                )
+            return None, tool, None, call_kwargs, None
         # Canonicalise BEFORE fingerprinting / deriving (see _canonical_call).
-        cargs, ckwargs = _canonical_call(
-            self._bind_sig, args, call_kwargs, o["ignore"], o["normalize"])
-        custom = bool(o["ignore"] or o["normalize"])
-        fp = fingerprint2(tool, cargs, ckwargs, legacy=not custom)
+        try:
+            cargs, ckwargs = _canonical_call(
+                self._bind_sig, args, call_kwargs, o["ignore"], o["normalize"])
+            custom = bool(o["ignore"] or o["normalize"])
+            fp = fingerprint2(tool, cargs, ckwargs, legacy=not custom)
+        except (TypeError, ValueError, MemoryError, RecursionError):
+            raise
+        except Exception as exc:  # an argument's own repr()/getattr blew up
+            raise ValueError(
+                f"{tool}(): cannot fingerprint an argument ({type(exc).__name__}: {exc}); "
+                f"pass plain values, or ignore=/normalize= for that argument"
+            ) from exc
         advance = None
         if key is None and o["derive"] == "seq":
             ctx = _RUN.get()

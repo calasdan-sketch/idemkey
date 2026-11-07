@@ -22,6 +22,7 @@ import os
 import sqlite3
 import threading
 import time
+import weakref
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS idem_keys (
@@ -64,6 +65,23 @@ class StoreCorruptedError(Exception):
     """Raised when the SQLite file is unreadable/corrupt."""
 
 
+_STORES = weakref.WeakSet()
+
+
+def _reset_locks_after_fork():
+    # A forked child inherits each store's locks in whatever state they were in
+    # at fork time. If the heartbeat thread (which does not exist in the child)
+    # held one, the child would wait on it forever. Give every store fresh locks;
+    # the SQLite connection itself is reopened on first use (see _ensure_open).
+    for store in list(_STORES):
+        store._lock = threading.Lock()
+        store._settled_cv = threading.Condition()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_locks_after_fork)
+
+
 class DedupStore:
     def __init__(self, path: str, durability: str = "full"):
         if durability not in ("full", "normal"):
@@ -81,12 +99,18 @@ class DedupStore:
         self._conn = None
         self._pid = None
         self._closed = False
+        _STORES.add(self)
         if path != ":memory:":
             parent = os.path.dirname(os.path.abspath(path))
             # Restrictive perms on directories we create; pre-existing
             # directories are left exactly as the operator set them.
             if not os.path.isdir(parent):
-                os.makedirs(parent, mode=0o700, exist_ok=True)
+                try:
+                    os.makedirs(parent, mode=0o700, exist_ok=True)
+                except OSError as exc:
+                    raise StoreCorruptedError(
+                        f"cannot create the folder for the dedup store {self.path!r}: "
+                        f"{exc.strerror or exc}") from exc
                 try:
                     os.chmod(parent, 0o700)
                 except OSError:
@@ -492,31 +516,36 @@ class DedupStore:
             pass
 
     # -- maintenance --------------------------------------------------------
-    def purge(self, older_than_seconds=DEFAULT_TTL_SECONDS, include_stale_pending=False):
+    def purge(self, older_than_seconds=DEFAULT_TTL_SECONDS, include_stale_pending=False,
+              dry_run=False):
         """Delete settled rows last updated longer ago than the TTL. Returns count.
 
         ``pending`` rows are never deleted by default — one may be a live
         execution, and deleting it would let a duplicate run. With
         ``include_stale_pending=True``, pending rows whose *heartbeat* is older
-        than the cutoff (owner presumed dead) are deleted too.
+        than the cutoff (owner presumed dead) are deleted too. ``dry_run=True``
+        deletes nothing and returns how many rows *would* go.
         """
         if not (isinstance(older_than_seconds, (int, float)) and older_than_seconds > 0):
             raise ValueError("purge older_than_seconds must be a positive number")
         cutoff = time.time() - older_than_seconds
         with self._lock:
             self._ensure_open()
+            verb = "SELECT COUNT(*) AS n FROM" if dry_run else "DELETE FROM"
             if include_stale_pending:
                 cur = self._conn.execute(
-                    """DELETE FROM idem_keys WHERE
+                    f"""{verb} idem_keys WHERE
                        (status != 'pending' AND updated_at < ?)
                        OR (status = 'pending' AND heartbeat < ?)""",
                     (cutoff, cutoff),
                 )
             else:
                 cur = self._conn.execute(
-                    "DELETE FROM idem_keys WHERE status != 'pending' AND updated_at < ?",
+                    f"{verb} idem_keys WHERE status != 'pending' AND updated_at < ?",
                     (cutoff,),
                 )
+            if dry_run:
+                return cur.fetchone()["n"]
             self._conn.commit()
             return cur.rowcount
 

@@ -1,3 +1,4 @@
+import sys
 import threading
 import time
 
@@ -147,6 +148,7 @@ def test_corrupt_store_raises(tmp_path):
 # --- audit-phase hardening --------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes (not run on Windows)")
 def test_store_file_is_owner_only(tmp_path):
     import os as _os
     import stat as _stat
@@ -162,6 +164,7 @@ def test_store_file_is_owner_only(tmp_path):
         s.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes (not run on Windows)")
 def test_preexisting_parent_dir_perms_untouched(tmp_path):
     import os as _os
     import stat as _stat

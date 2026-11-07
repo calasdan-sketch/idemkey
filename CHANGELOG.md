@@ -2,6 +2,50 @@
 
 ## 0.3.0 - unreleased
 
+Versions on PyPI as of 2026-11-07: 0.1.1 only (0.2.0 was never released, so
+0.3.0 is the next release and carries the 0.2.0 changes below). **Upgrading
+from 0.1.1:** stored keys are now namespaced (`scope|tool|prefix|key`); to keep
+reading a store written by 0.1.x pass `namespace=False`. Calls with a key and
+the same arguments keep replaying; numeric/text fingerprints written by 0.1/0.2
+still match.
+
+### Round 4 (the first hour after `pip install`) - fixed
+
+- **The sdist and wheel shipped without a LICENSE file** although the metadata
+  says MIT. `LICENSE` (MIT, Calas Automations Inc.) is now in both, with the
+  CHANGELOG in the sdist; Python 3.9-3.13 classifiers added.
+- **A keyless call could be stopped by its own arguments.** The README promises
+  "no key -> runs exactly once", but the arguments were fingerprinted anyway, so
+  an argument whose `repr()` raised (or a huge one) blocked a call that needs no
+  dedup. Keyless calls are no longer fingerprinted. A keyed call with such an
+  argument now raises a plain `ValueError("cannot fingerprint an argument ...")`
+  before the tool runs, instead of the argument's own exception.
+- **The CLI printed Python tracebacks** for a corrupt store file, a store path
+  that is a folder, or a folder that cannot be created. It now prints
+  `idemkey: <plain reason>` on stderr and exits 1. `DedupStore(...)` raises
+  `StoreCorruptedError` (not a bare `OSError`) when it cannot create the folder.
+- **`idemkey log` crashed on a non-UTF-8 console** (ASCII / C locale / Windows
+  cp1252) when a stored key held other characters. Output now falls back to
+  `\uXXXX` escapes. `idemkey export` writes LF line ends on Windows too.
+- **A forked child could hang forever.** `os.fork()` taken while the parent's
+  heartbeat thread held the store lock left the child waiting on a lock no
+  thread in the child would ever release (about half the runs of a repro; it
+  also made the suite hang). Every store now gets fresh locks in the child.
+- Error messages that echo a key are escaped and cut to 80 characters.
+- A flaky timing test (`test_inprocess_waiters_wake_immediately`) failed on a
+  loaded machine; its margin is now wide enough. POSIX-mode tests are skipped on
+  Windows.
+- Removed a stray binary wheel of another project from the repo root.
+
+### Round 4 - added
+
+- `idemkey --version`, `idemkey demo` (a 30-second self-check in a temporary
+  store: the retried charge runs once), `idemkey stats --json`,
+  `idemkey doctor --json` (exit code unchanged), `idemkey purge --dry-run`
+  (`DedupStore.purge(dry_run=True)`).
+- `docs/ROUND4.md` (review notes, scored ideas, untested items) and
+  `PUBLISH-CHECKLIST.md`.
+
 ### Round 3 (review pass A + B) - fixes
 
 - **A write that landed could be re-run after a lost response, even with

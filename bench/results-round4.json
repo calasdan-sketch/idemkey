@@ -1,0 +1,319 @@
+{
+  "python": "3.13.18",
+  "sqlite": "3.53.1",
+  "cpus": 2,
+  "crash": {
+    "idemkey:default": {
+      "ops": 90,
+      "before_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_effect": {
+        "ops": 30,
+        "duplicate": 30,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_commit": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "duplicate_rate": 0.3333,
+      "lost_rate": 0.0
+    },
+    "idemkey:fast": {
+      "ops": 90,
+      "before_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_effect": {
+        "ops": 30,
+        "duplicate": 30,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_commit": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "duplicate_rate": 0.3333,
+      "lost_rate": 0.0
+    },
+    "idemkey:reconcile": {
+      "ops": 90,
+      "before_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_commit": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "duplicate_rate": 0.0,
+      "lost_rate": 0.0
+    },
+    "idemkey:inject": {
+      "ops": 90,
+      "before_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_commit": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "duplicate_rate": 0.0,
+      "lost_rate": 0.0
+    },
+    "idemkey:atomic": {
+      "ops": 90,
+      "before_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_effect": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "after_commit": {
+        "ops": 30,
+        "duplicate": 0,
+        "lost": 0,
+        "retry_errors": 0
+      },
+      "duplicate_rate": 0.0,
+      "lost_rate": 0.0
+    }
+  },
+  "race": {
+    "idemkey:default": {
+      "racers": 1000,
+      "keys": 20,
+      "keys_with_duplicate_effect": 0,
+      "keys_never_executed": 0,
+      "extra_effects": 0,
+      "errors": {},
+      "p50_ms": 174.9,
+      "p99_ms": 250.5,
+      "wall_s": 0.49
+    },
+    "idemkey:fast": {
+      "racers": 1000,
+      "keys": 20,
+      "keys_with_duplicate_effect": 0,
+      "keys_never_executed": 0,
+      "extra_effects": 0,
+      "errors": {},
+      "p50_ms": 56.7,
+      "p99_ms": 184.8,
+      "wall_s": 0.36
+    },
+    "idemkey:reconcile": {
+      "racers": 1000,
+      "keys": 20,
+      "keys_with_duplicate_effect": 0,
+      "keys_never_executed": 0,
+      "extra_effects": 0,
+      "errors": {},
+      "p50_ms": 200.6,
+      "p99_ms": 316.2,
+      "wall_s": 0.45
+    },
+    "idemkey:inject": {
+      "racers": 1000,
+      "keys": 20,
+      "keys_with_duplicate_effect": 0,
+      "keys_never_executed": 0,
+      "extra_effects": 0,
+      "errors": {},
+      "p50_ms": 146.1,
+      "p99_ms": 219.3,
+      "wall_s": 0.31
+    },
+    "idemkey:atomic": {
+      "racers": 1000,
+      "keys": 20,
+      "keys_with_duplicate_effect": 0,
+      "keys_never_executed": 0,
+      "extra_effects": 0,
+      "errors": {},
+      "p50_ms": 225.9,
+      "p99_ms": 423.0,
+      "wall_s": 0.53
+    }
+  },
+  "speed": {
+    "idemkey:default": {
+      "new_keys_per_s": 563,
+      "replays_per_s": 18672,
+      "threads8_new_keys_per_s": 516
+    },
+    "idemkey:fast": {
+      "new_keys_per_s": 4165,
+      "replays_per_s": 21968,
+      "threads8_new_keys_per_s": 3922
+    },
+    "idemkey:reconcile": {
+      "new_keys_per_s": 1355,
+      "replays_per_s": 18877,
+      "threads8_new_keys_per_s": 1006
+    },
+    "idemkey:inject": {
+      "new_keys_per_s": 993,
+      "replays_per_s": 21119,
+      "threads8_new_keys_per_s": 837
+    },
+    "idemkey:atomic": {
+      "new_keys_per_s": 634,
+      "replays_per_s": 16988,
+      "threads8_new_keys_per_s": 658
+    }
+  },
+  "semantic": {
+    "idemkey": {
+      "merged_default": 9,
+      "merged_configured": 11,
+      "same_total": 11,
+      "wrongly_merged": 0,
+      "diff_total": 10,
+      "detail": {
+        "int vs float 10/10.0": {
+          "default": true,
+          "configured": true
+        },
+        "int vs Decimal('10.00')": {
+          "default": true,
+          "configured": true
+        },
+        "NFC vs NFD unicode": {
+          "default": true,
+          "configured": true
+        },
+        "positional vs keyword spelling": {
+          "default": true,
+          "configured": true
+        },
+        "dict key order": {
+          "default": true,
+          "configured": true
+        },
+        "set order": {
+          "default": true,
+          "configured": true
+        },
+        "equal dataclass instances": {
+          "default": true,
+          "configured": true
+        },
+        "equal plain-object instances": {
+          "default": true,
+          "configured": true
+        },
+        "equal namedtuples": {
+          "default": true,
+          "configured": true
+        },
+        "fresh request_id per retry": {
+          "default": false,
+          "configured": true
+        },
+        "email case/whitespace": {
+          "default": false,
+          "configured": true
+        },
+        "10 vs 11": {
+          "wrongly_merged": false
+        },
+        "'10' vs 10": {
+          "wrongly_merged": false
+        },
+        "True vs 1": {
+          "wrongly_merged": false
+        },
+        "0.1 vs Decimal('0.1')": {
+          "wrongly_merged": false
+        },
+        "memo 'a' vs 'A'": {
+          "wrongly_merged": false
+        },
+        "[1,2] vs [2,1]": {
+          "wrongly_merged": false
+        },
+        "None vs ''": {
+          "wrongly_merged": false
+        },
+        "objects, different state": {
+          "wrongly_merged": false
+        },
+        "dataclasses, different state": {
+          "wrongly_merged": false
+        },
+        "request_id differs, NOT ignored": {
+          "wrongly_merged": false
+        }
+      }
+    }
+  },
+  "lost": {
+    "this tree": {
+      "default": {
+        "ops": 60,
+        "ops_with_duplicate_effect": 60,
+        "errors": 0
+      },
+      "reconcile": {
+        "ops": 60,
+        "ops_with_duplicate_effect": 0,
+        "errors": 0
+      },
+      "inject_key": {
+        "ops": 60,
+        "ops_with_duplicate_effect": 0,
+        "errors": 0
+      }
+    }
+  },
+  "fp": {
+    "this tree": {
+      "ints_300k": "0.146 s",
+      "text_20MB": "0.127 s",
+      "decimal_1e999999999": "0.0 s",
+      "int_10^100000": "0.004 s",
+      "decimals_differ_past_28_digits": "distinct"
+    }
+  }
+}
