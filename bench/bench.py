@@ -446,6 +446,103 @@ def run_semantic():
     return res
 
 
+# -- round 3: lost responses inside one call, and fingerprint safety/latency -----
+
+
+def run_lost(n=60):
+    """The write lands, then the response is lost (``TimeoutError``) - inside ONE
+    guarded call, so the library's own retry loop re-runs the tool.  One effect
+    per op is correct.  Runs against whatever idemkey is on PYTHONPATH."""
+    from idemkey import NOT_FOUND, DedupStore, guard
+    tmp = tempfile.mkdtemp(prefix="idembench-")
+    res = {}
+
+    def scenario(name, make):
+        world, seen, first = [], set(), set()
+
+        def effect(op, dk=None):
+            if dk is not None and dk in seen:
+                pass
+            else:
+                if dk is not None:
+                    seen.add(dk)
+                world.append(op)
+            if op not in first:  # the first attempt of every op "loses" its response
+                first.add(op)
+                raise TimeoutError("response lost")
+            return {"op": op}
+
+        g = make(effect, world, DedupStore(os.path.join(tmp, name + ".db")))
+        errors = 0
+        for i in range(n):
+            try:
+                g(f"op{i}", idemkey=f"lost-{i}")
+            except Exception:  # noqa: BLE001
+                errors += 1
+        dup = sum(1 for i in range(n) if world.count(f"op{i}") > 1)
+        res[name] = {"ops": n, "ops_with_duplicate_effect": dup, "errors": errors}
+
+    base = {"max_retries": 3, "sleep": lambda s: None}
+    scenario("default", lambda eff, w, st: guard(lambda op: eff(op), store=st, **base))
+    scenario("reconcile", lambda eff, w, st: guard(
+        lambda op: eff(op), store=st, reconcile=lambda op: {"op": op} if op in w else NOT_FOUND, **base))
+
+    def inj(eff, w, st):
+        def tool(op, *, dk=None):
+            return eff(op, dk)
+        return guard(tool, store=st, inject_key="dk", **base)
+    scenario("inject_key", inj)
+    shutil.rmtree(tmp, ignore_errors=True)
+    return res
+
+
+def run_fp():
+    """Fingerprint latency on large/hostile arguments and exactness of numbers.
+    Each probe is bounded to 20 s (a probe that does not finish reports 'hang')."""
+    import decimal
+    import multiprocessing as _mp
+
+    def probe(q, which):
+        from idemkey.keys import fingerprint2 as fp
+        D = decimal.Decimal
+        t0 = time.perf_counter()
+        if which == "ints_300k":
+            fp("t", (list(range(300_000)),))
+        elif which == "text_20MB":
+            fp("t", ("a" * 20_000_000,))
+        elif which == "decimal_1e999999999":
+            fp("t", (D("1e999999999"),))
+        elif which == "int_10^100000":
+            try:
+                fp("t", (10 ** 100000,))
+            except ValueError as exc:
+                q.put(("error: " + type(exc).__name__, 0))
+                return
+        elif which == "decimals_differ_past_28_digits":
+            a = fp("t", (D("1.0000000000000000000000000000001"),))
+            b = fp("t", (D("1.0000000000000000000000000000002"),))
+            q.put(("distinct" if a != b else "WRONGLY MERGED", 0))
+            return
+        q.put(("ok", round(time.perf_counter() - t0, 3)))
+
+    out = {}
+    ctx = _mp.get_context("fork" if sys.platform != "win32" else "spawn")
+    for which in ("ints_300k", "text_20MB", "decimal_1e999999999", "int_10^100000",
+                  "decimals_differ_past_28_digits"):
+        q = ctx.Queue()
+        p = ctx.Process(target=probe, args=(q, which))
+        p.start()
+        p.join(20)
+        if p.is_alive():
+            p.terminate()
+            p.join()
+            out[which] = "hang (>20 s)"
+        else:
+            status, secs = q.get() if not q.empty() else ("crashed", 0)
+            out[which] = status if status != "ok" else f"{secs} s"
+    return out
+
+
 # -- driver --------------------------------------------------------------------
 
 
@@ -468,7 +565,8 @@ def table(title, rows, cols):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("what", choices=["all", "crash", "race", "speed", "semantic", "worker", "speed1", "semantic1"])
+    ap.add_argument("what", choices=["all", "crash", "race", "speed", "semantic", "lost", "fp", "worker", "speed1", "semantic1",
+                                     "lost1", "fp1"])
     ap.add_argument("--impl", action="append")
     ap.add_argument("--ops", type=int, default=90)
     ap.add_argument("--racers", type=int, default=1000)
@@ -476,6 +574,7 @@ def main():
     ap.add_argument("--procs", type=int, default=10)
     ap.add_argument("--speed-n", type=int, default=400)
     ap.add_argument("--legacy-path")
+    ap.add_argument("--prev-path", help="source tree of the previous round, for the lost/fp before-after rows")
     ap.add_argument("--json")
     ap.add_argument("--worker-impl")
     ap.add_argument("--workdir")
@@ -486,6 +585,12 @@ def main():
         return worker_main(a)
     if a.what == "semantic1":
         print(json.dumps(run_semantic()))
+        return
+    if a.what == "lost1":
+        print(json.dumps(run_lost()))
+        return
+    if a.what == "fp1":
+        print(json.dumps(run_fp()))
         return
     if a.what == "speed1":
         print(json.dumps(run_speed(a.worker_impl, a.speed_n, None)))
@@ -554,6 +659,21 @@ def main():
                    for k, v in out["semantic"].items()],
                   ["same-call pairs deduped (defaults)", "same-call pairs deduped (ignore=/normalize= set)",
                    "different calls wrongly merged"])
+        for what, label in (("lost", "Lost response inside one call (retry loop re-runs the tool)"),
+                            ("fp", "Fingerprint probes (large / hostile arguments)")):
+            if a.what not in ("all", what):
+                continue
+            out[what] = {}
+            versions = ([("previous round", a.prev_path)] if a.prev_path else []) + [("this tree", ROOT)]
+            for name, path in versions:
+                env = dict(os.environ)
+                env["PYTHONPATH"] = path
+                cp = subprocess.run([sys.executable, os.path.abspath(__file__), what + "1"],
+                                    env=env, capture_output=True, text=True, check=True)
+                out[what][name] = json.loads(cp.stdout.strip().splitlines()[-1])
+            print(f"\n## {label}\n")
+            for name, v in out[what].items():
+                print(f"- {name}: {json.dumps(v)}")
     finally:
         if redis_proc:
             redis_proc.terminate()

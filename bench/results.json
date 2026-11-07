@@ -219,9 +219,9 @@
       "keys_never_executed": 0,
       "extra_effects": 0,
       "errors": {},
-      "p50_ms": 155.2,
-      "p99_ms": 216.1,
-      "wall_s": 0.34
+      "p50_ms": 144.5,
+      "p99_ms": 204.6,
+      "wall_s": 0.33
     },
     "idemkey:default": {
       "racers": 1000,
@@ -230,9 +230,9 @@
       "keys_never_executed": 0,
       "extra_effects": 0,
       "errors": {},
-      "p50_ms": 116.4,
-      "p99_ms": 203.0,
-      "wall_s": 0.27
+      "p50_ms": 159.3,
+      "p99_ms": 284.7,
+      "wall_s": 0.36
     },
     "idemkey:fast": {
       "racers": 1000,
@@ -241,9 +241,9 @@
       "keys_never_executed": 0,
       "extra_effects": 0,
       "errors": {},
-      "p50_ms": 104.3,
-      "p99_ms": 215.3,
-      "wall_s": 0.3
+      "p50_ms": 49.7,
+      "p99_ms": 132.6,
+      "wall_s": 0.27
     },
     "idemkey:reconcile": {
       "racers": 1000,
@@ -252,9 +252,9 @@
       "keys_never_executed": 0,
       "extra_effects": 0,
       "errors": {},
-      "p50_ms": 104.1,
-      "p99_ms": 217.8,
-      "wall_s": 0.31
+      "p50_ms": 78.5,
+      "p99_ms": 169.7,
+      "wall_s": 0.25
     },
     "idemkey:inject": {
       "racers": 1000,
@@ -263,9 +263,9 @@
       "keys_never_executed": 0,
       "extra_effects": 0,
       "errors": {},
-      "p50_ms": 129.4,
-      "p99_ms": 240.3,
-      "wall_s": 0.33
+      "p50_ms": 163.4,
+      "p99_ms": 270.5,
+      "wall_s": 0.39
     },
     "idemkey:atomic": {
       "racers": 1000,
@@ -274,9 +274,9 @@
       "keys_never_executed": 0,
       "extra_effects": 0,
       "errors": {},
-      "p50_ms": 154.3,
-      "p99_ms": 235.4,
-      "wall_s": 0.37
+      "p50_ms": 134.0,
+      "p99_ms": 249.7,
+      "wall_s": 0.35
     },
     "idempotency-filestore": {
       "racers": 1000,
@@ -285,64 +285,64 @@
       "keys_never_executed": 0,
       "extra_effects": 0,
       "errors": {
-        "KeyError": 4
+        "KeyError": 3
       },
-      "p50_ms": 64.0,
-      "p99_ms": 180.3,
-      "wall_s": 0.31
+      "p50_ms": 37.1,
+      "p99_ms": 183.6,
+      "wall_s": 10.17
     },
     "latch-redis": {
       "racers": 1000,
       "keys": 20,
       "keys_with_duplicate_effect": 17,
       "keys_never_executed": 0,
-      "extra_effects": 17,
+      "extra_effects": 83,
       "errors": {},
-      "p50_ms": 131.1,
-      "p99_ms": 199.0,
-      "wall_s": 0.39
+      "p50_ms": 211.8,
+      "p99_ms": 362.4,
+      "wall_s": 0.52
     }
   },
   "speed": {
     "idemkey-legacy": {
-      "new_keys_per_s": 1076,
-      "replays_per_s": 21065,
-      "threads8_new_keys_per_s": 1190
+      "new_keys_per_s": 548,
+      "replays_per_s": 15417,
+      "threads8_new_keys_per_s": 820
     },
     "idemkey:default": {
-      "new_keys_per_s": 1721,
-      "replays_per_s": 21954,
-      "threads8_new_keys_per_s": 1218
+      "new_keys_per_s": 996,
+      "replays_per_s": 19412,
+      "threads8_new_keys_per_s": 1325
     },
     "idemkey:fast": {
-      "new_keys_per_s": 4718,
-      "replays_per_s": 21430,
-      "threads8_new_keys_per_s": 2888
+      "new_keys_per_s": 4725,
+      "replays_per_s": 12977,
+      "threads8_new_keys_per_s": 4273
     },
     "idemkey:reconcile": {
-      "new_keys_per_s": 1501,
-      "replays_per_s": 22367,
-      "threads8_new_keys_per_s": 1081
+      "new_keys_per_s": 851,
+      "replays_per_s": 19643,
+      "threads8_new_keys_per_s": 1236
     },
     "idemkey:inject": {
-      "new_keys_per_s": 1187,
-      "replays_per_s": 22766,
-      "threads8_new_keys_per_s": 991
+      "new_keys_per_s": 1243,
+      "replays_per_s": 19954,
+      "threads8_new_keys_per_s": 946
     },
     "idemkey:atomic": {
-      "new_keys_per_s": 813,
-      "replays_per_s": 22368,
-      "threads8_new_keys_per_s": 608
+      "new_keys_per_s": 745,
+      "replays_per_s": 19046,
+      "threads8_new_keys_per_s": 524
     },
     "idempotency-filestore": {
-      "new_keys_per_s": 5366,
-      "replays_per_s": 51936,
-      "threads8_new_keys_per_s": 1437
+      "new_keys_per_s": 2871,
+      "replays_per_s": 56000,
+      "threads8_new_keys_per_s": 4524
     },
     "latch-redis": {
-      "new_keys_per_s": 5016,
-      "replays_per_s": 6482,
-      "threads8_new_keys_per_s": 2397
+      "new_keys_per_s": 8438,
+      "replays_per_s": 13981,
+      "threads8_new_keys_per_s": 4281
     }
   },
   "semantic": {
@@ -511,6 +511,58 @@
           "wrongly_merged": false
         }
       }
+    }
+  },
+  "lost": {
+    "previous round": {
+      "default": {
+        "ops": 60,
+        "ops_with_duplicate_effect": 60,
+        "errors": 0
+      },
+      "reconcile": {
+        "ops": 60,
+        "ops_with_duplicate_effect": 60,
+        "errors": 0
+      },
+      "inject_key": {
+        "ops": 60,
+        "ops_with_duplicate_effect": 0,
+        "errors": 0
+      }
+    },
+    "this tree": {
+      "default": {
+        "ops": 60,
+        "ops_with_duplicate_effect": 60,
+        "errors": 0
+      },
+      "reconcile": {
+        "ops": 60,
+        "ops_with_duplicate_effect": 0,
+        "errors": 0
+      },
+      "inject_key": {
+        "ops": 60,
+        "ops_with_duplicate_effect": 0,
+        "errors": 0
+      }
+    }
+  },
+  "fp": {
+    "previous round": {
+      "ints_300k": "0.354 s",
+      "text_20MB": "0.212 s",
+      "decimal_1e999999999": "hang (>20 s)",
+      "int_10^100000": "error: ValueError",
+      "decimals_differ_past_28_digits": "WRONGLY MERGED"
+    },
+    "this tree": {
+      "ints_300k": "0.161 s",
+      "text_20MB": "0.129 s",
+      "decimal_1e999999999": "0.0 s",
+      "int_10^100000": "0.004 s",
+      "decimals_differ_past_28_digits": "distinct"
     }
   }
 }

@@ -270,7 +270,14 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    args.func(args)
+    try:
+        args.func(args)
+    except BrokenPipeError:  # `idemkey export | head`
+        try:
+            sys.stdout = open(os.devnull, "w")  # noqa: SIM115 - keep flush-at-exit quiet
+        except OSError:
+            pass
+        raise SystemExit(0) from None
 
 
 if __name__ == "__main__":

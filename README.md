@@ -114,7 +114,14 @@ from idemkey import RetryableError
 
 @guard(max_retries=5, retry_on=(TimeoutError, RetryableError))
 def flaky_tool(...): ...
+
+raise RetryableError("429", retry_after=7)   # wait 7 s (capped at backoff_cap), not the jittered default
 ```
+
+A timeout is exactly the case where the write may have landed. If you give
+`guard()` a `reconcile=` hook (see *Closing the exactly-once window*), it is
+asked before **every** re-run, including the retries inside one call - without
+it the retry loop would write a second time.
 
 ### Partial-success verification
 
@@ -230,10 +237,46 @@ a brand-new operation — Stripe's behaviour, which prunes keys after 24 h:
 guard(fn, ttl=24 * 3600)
 ```
 
+### Typed results
+
+A replay returns what the first call returned, including `tuple`, `bytes`,
+`set`/`frozenset`, `Decimal`, `datetime`/`date`/`time`, `UUID` and dicts with
+non-string keys (`result_codec="typed"`, the default). Namedtuples come back
+as plain tuples; arbitrary objects are stored as `repr()` text and come back as
+that string. `result_codec="json"` restores the plain-JSON behaviour of 0.2.
+Rows stored by earlier versions decode unchanged.
+
+### Seeing what happened
+
+```python
+guard(fn, on_event=lambda e: metrics.incr(e["event"]))   # or logging.getLogger("idemkey") at DEBUG
+# events: executing, executed, failed, replayed, retryable_error, reconciled, fingerprint_mismatch
+```
+
+The event carries the stored key (model-chosen text): escape it before it
+reaches a terminal. A hook that raises is ignored.
+
+### Test your own tool
+
+```python
+from idemkey.testing import check_tool
+
+report = check_tool(create_order, args=("ord-1",), effects=lambda: len(fake_db))
+print(report)            # same key twice / write landed + response lost / replay equal
+report.raise_if_unsafe()
+```
+
+Pass the same `guard()` options you use in production (`reconcile=`,
+`inject_key=` ...). It calls your tool for real, so aim it at a sandbox.
+`lost_response(fn)` is the underlying fault injector.
+
 ### CLI
 
 ```bash
 idemkey log --status failed --limit 20   # recent entries
+idemkey log --json                       # same, machine-readable (no results)
+idemkey export --no-results > audit.jsonl  # every row as JSON lines
+idemkey doctor                           # unknown / stale-pending keys, loose file mode; exit 1 = look at it
 idemkey show order-7f3a                  # full row incl. replayed result
 idemkey stats                            # counts by status
 idemkey purge --older-than 24            # delete entries older than 24h (default TTL)
@@ -257,6 +300,7 @@ Store location: `--store PATH`, or `IDEMKEY_STORE` env, or
 |---|---|
 | `guard(fn, **opts)` | decorator / wrapper factory (also `@guard`, `@guard(...)`); sync or async |
 | `mcp_tool(fn, *, name, description, **guard_opts)` | MCP-tool wrapper |
+| `idemkey.testing.check_tool(fn, args, effects=, **guard_opts)` / `lost_response(fn)` | safety report / fault injector for tests |
 | `new_key(prefix="idem_")` | random key |
 | `derive_key(tool, args, kwargs, scope)` | deterministic key (opt-in) |
 | `guarded.store_key(key)` / `namespaced_key(key, tool, scope, prefix)` | the key exactly as stored |
@@ -268,7 +312,8 @@ Key `guard()` options: `key`, `key_arg="idemkey"`, `tool`, `derive=False`,
 `require_key=False`, `scope="default"`, `key_prefix=None`, `namespace=True`, `store`, `max_retries=3`, `backoff_base=0.5`,
 `backoff_cap=30.0`, `retry_on=(TimeoutError, RetryableError)`,
 `verify=None`, `fingerprint_policy="error"`, `claim_ttl=300.0`,
-`inflight_timeout=60.0`, `ttl=None`, `result_max_bytes=1_000_000`.
+`inflight_timeout=60.0`, `ttl=None`, `result_max_bytes=1_000_000`,
+`result_codec="typed"`, `on_event=None`.
 
 ## Closing the exactly-once window (0.3.0)
 
@@ -299,26 +344,27 @@ replayed agent run reuses its keys while two intentional identical calls stay
 distinct, and `redact=` / `store_result=False` / `error_detail="type"` to keep
 PII out of the store.
 
-## Benchmark (re-run: `python bench/bench.py all`)
+## Benchmark (re-run: `python bench/bench.py all --legacy-path DIR_OF_0.2 --prev-path DIR_OF_PREVIOUS_ROUND`)
 
 Fault injection, 90 logical operations: attempt 1 is SIGKILLed (a third of
 the time before the effect, a third after the effect but before the library
 recorded it, a third after everything), attempt 2 is a fresh process retrying
 with the same key. 2-vCPU sandbox VM, Python 3.13, SQLite 3.53, redis-server
-for latch; one run, so treat small differences as noise
-(`bench/results.json` has the raw numbers).
+for latch; one run, **on a VM shared with other jobs (load average 3-10 while it
+ran), so the speed columns are noisy** - the same code measured 1721 new keys/s
+in the previous round's run and 996 in this one. Raw numbers: `bench/results.json`.
 
 | | duplicate effects | lost effects | 1000 racers x 20 keys: keys with a duplicate | new keys/s | replays/s |
 |---|---|---|---|---|---|
 | no dedup (naive retry) | 67% | 0% | - | - | - |
-| idemkey 0.2 | 33% | 0% | 0 | 1076 | 21065 |
-| idemkey 0.3 default | 33% | 0% | 0 | 1721 | 21954 |
-| idemkey 0.3 `durability="normal"` | 33% | 0% | 0 | 4718 | 21430 |
-| idemkey 0.3 `reconcile=` | **0%** | 0% | 0 | 1501 | 22367 |
-| idemkey 0.3 `inject_key=` (downstream dedups) | **0%** | 0% | 0 | 1187 | 22766 |
-| idemkey 0.3 `atomic=` | **0%** | 0% | 0 | 813 | 22368 |
-| [idempotency](https://pypi.org/project/idempotency/) 0.1.0 FileStore | 33% | 0% | 0 (4 `KeyError`s) | 5366 | 51936 |
-| [latch-idempotent](https://pypi.org/project/latch-idempotent/) 0.4.1 + Redis | 33% | 0% | 0 in one run, 17 in another | 5016 | 6482 |
+| idemkey 0.2 | 33% | 0% | 0 | 548 | 15417 |
+| idemkey 0.3 default | 33% | 0% | 0 | 996 | 19412 |
+| idemkey 0.3 `durability="normal"` | 33% | 0% | 0 | 4725 | 12977 |
+| idemkey 0.3 `reconcile=` | **0%** | 0% | 0 | 851 | 19643 |
+| idemkey 0.3 `inject_key=` (downstream dedups) | **0%** | 0% | 0 | 1243 | 19954 |
+| idemkey 0.3 `atomic=` | **0%** | 0% | 0 | 745 | 19046 |
+| [idempotency](https://pypi.org/project/idempotency/) 0.1.0 FileStore | 33% | 0% | 0 (3 `KeyError`s) | 2871 | 56000 |
+| [latch-idempotent](https://pypi.org/project/latch-idempotent/) 0.4.1 + Redis | 33% | 0% | 17 | 8438 | 13981 |
 
 Read it honestly: the 33% that remains is the crash-after-write window, which
 *no* key store can close alone - the three opt-in modes close it only because
@@ -328,17 +374,45 @@ cosmetic retries of the same call, 10 genuinely different calls): 0.2 merged
 5/11 and 0 wrong; 0.3 merges 9/11 by default, 11/11 with `ignore=`/`normalize=`,
 0 wrong. The competitors were run as released and not tuned; they were not
 designed for this fault model, and the others' faster new-key rate comes from
-weaker durability (no per-key fsync). Temporal, Inngest, DBOS and Restate
-(durable-execution engines) were not run: they are servers/runtimes, not
-drop-in wrappers; their documented model is at-least-once with user-supplied
-idempotency keys for outside effects (unverified here).
+weaker durability (no per-key fsync). latch + Redis showed duplicates under the
+1000-racer test in this run and in one of two runs last round (0 in the other).
+Temporal, Inngest, DBOS and Restate (durable-execution engines) were not run:
+they are servers/runtimes, not drop-in wrappers; their documented model is
+at-least-once with user-supplied idempotency keys for outside effects
+(unverified here).
+
+**Lost response inside one call** (round 3; the write lands, the tool then
+raises `TimeoutError`, the library's retry loop runs it again; 60 operations,
+in-process, `bench.py lost`). Operations with a duplicate effect:
+
+| | plain retry | `reconcile=` | `inject_key=` |
+|---|---|---|---|
+| previous round | 60 / 60 | 60 / 60 | 0 / 60 |
+| this tree | 60 / 60 | **0 / 60** | 0 / 60 |
+
+Plain retry duplicates by design (nothing tells the wrapper the first attempt
+landed); that is what `reconcile=` / `inject_key=` are for.
+
+**Hostile or large arguments** (`bench.py fp`, each probe limited to 20 s):
+
+| fingerprint of | previous round | this tree |
+|---|---|---|
+| `Decimal("1e999999999")` | hangs (>20 s) | 0.0 s |
+| `10**100000` | `ValueError` | 0.004 s |
+| `1.0000000000000000000000000000001` vs `...2` as `Decimal` | merged (wrong) | distinct |
+| list of 300,000 ints | 0.35 s | 0.16 s |
+| 20 MB string | 0.21 s | 0.13 s |
 
 ## How it compares
 
-Checked 2026-11-06 against each project's own PyPI/docs page. "—" means the
-page does not mention it; it may exist undocumented.
+Checked 2026-11-06 against each project's own PyPI/docs page; on 2026-11-07 the
+PyPI descriptions of agent-ledger 0.2.1, latch-idempotent 0.4.1 and
+idempotency-kit 0.5.0 were re-read (the first part of each page only), which
+is where the last three rows come from. "—" means the page does not mention it;
+it may exist undocumented. Cells for features not re-read keep the earlier
+versions' answers.
 
-| | idemkey | [Powertools idempotency](https://docs.aws.amazon.com/powertools/python/1.26.1/utilities/idempotency/) | [idempotency](https://pypi.org/project/idempotency/) | [latch-idempotent](https://pypi.org/project/latch-idempotent/0.2.0/) | [agent-ledger](https://pypi.org/project/agent-ledger/0.1.1/) | [idempotency-kit](https://pypi.org/project/idempotency-kit/) |
+| | idemkey | [Powertools idempotency](https://docs.aws.amazon.com/powertools/python/1.26.1/utilities/idempotency/) | [idempotency](https://pypi.org/project/idempotency/) | [latch-idempotent](https://pypi.org/project/latch-idempotent/) 0.4.1 | [agent-ledger](https://pypi.org/project/agent-ledger/) 0.2.1 | [idempotency-kit](https://pypi.org/project/idempotency-kit/) 0.5.0 |
 |---|---|---|---|---|---|---|
 | Built for agent tool calls | yes | no (Lambda) | no | yes | yes | no |
 | Required runtime deps | none | DynamoDB table | — | none | — (Postgres for prod) | Redis 6+ |
@@ -350,12 +424,17 @@ page does not mention it; it may exist undocumented.
 | Async tools | yes | — | — | yes | yes (async only) | yes (async first) |
 | Key in MCP tool schema | yes | — | — | — | — | — |
 | Stale-claim takeover + owner fencing | yes | — | — | — | takeover | — |
+| Event / metrics hook | `on_event`, logger | — | — | `latch.tracing` | receipts / audit trail | built-in metrics |
+| Fault-injection helper for your tests | `idemkey.testing` | — | — | `latch.chaos` | — | — |
+| Human approval of a call | no | — | — | — | yes | — |
 
 What others do better (honestly): Powertools, latch-idempotent,
 idempotency-kit and `idempotency` share state across machines through
-DynamoDB or Redis — idemkey is single-host. agent-ledger adds human approval
-gates and an audit query API; latch-idempotent bundles circuit breakers,
-timeouts and budget caps.
+DynamoDB or Redis - idemkey is single-host. agent-ledger adds intent-bound
+human approval gates and a queryable audit/receipt trail; latch-idempotent
+bundles circuit breakers, timeouts, budget caps and saga/compensation for
+multi-step work. idemkey is narrower on purpose: a dependency-free store plus
+the three ways of closing the crash-after-write window.
 
 ## Limitations (honest)
 
@@ -381,9 +460,19 @@ timeouts and budget caps.
   success for a write that never landed. Make verify a real read-back check,
   keep it fast and bounded.
 - **Replay returns the original result**, even if the world changed since
-  (Stripe parity). Results go through a JSON round-trip: tuples come back as
-  lists, arbitrary objects as `repr()` strings, payloads over
-  `result_max_bytes` aren't replayable (`ResultNotReplayableError` on dup).
+  (Stripe parity). Results are stored as tagged JSON: the common types round-trip
+  (see *Typed results*), arbitrary objects come back as `repr()` strings, and
+  payloads over `result_max_bytes` - or a result that cannot be serialised or
+  redacted - are not replayable (`ResultNotReplayableError` on a duplicate; the
+  call itself still succeeds, with a `RuntimeWarning`).
+- **Long text and bytes are fingerprinted by digest** (above 4096 characters),
+  numbers exactly, but other exotic types by `repr()` with addresses scrubbed:
+  two different lambdas or generators share a fingerprint.
+- **Tested on CPython 3.13 on Linux only.** The code parses as Python 3.9, and CI
+  is configured for Linux/macOS/Windows and 3.9-3.13, but that matrix was not run
+  for this round; Windows paths and file modes are untested here.
+- **`idemkey export` includes the claim owner (host name and pid)** and, unless you
+  pass `--no-results`, the stored results.
 - **Derived keys dedup across processes** sharing a store when (scope, tool,
   args) collide — by design; scope accordingly, and never derive keys for
   intentionally-repeatable operations.

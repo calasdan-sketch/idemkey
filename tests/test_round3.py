@@ -398,3 +398,103 @@ def test_lost_response_async():
         return await f()
 
     assert asyncio.run(go()) == 1 and len(n) == 2
+
+
+# -- pass B: a landed write must never be left pending ---------------------
+
+def test_unserialisable_or_unredactable_result_does_not_leave_key_pending(store):
+    class Evil:
+        def __repr__(self):
+            raise RuntimeError("bad repr")
+
+    n = []
+
+    @guard(store=store)
+    def tool():
+        n.append(1)
+        return Evil()
+
+    with pytest.warns(RuntimeWarning):
+        tool(idemkey="k1")
+    assert one_status(store, "k1") == "completed"
+    from idemkey import ResultNotReplayableError
+    with pytest.raises(ResultNotReplayableError):
+        tool(idemkey="k1")
+    assert len(n) == 1
+
+    @guard(store=store, redact=lambda r: 1 / 0)
+    def tool2():
+        return {"card": "4111"}
+
+    with pytest.warns(RuntimeWarning):
+        assert tool2(idemkey="k2") == {"card": "4111"}
+    row = next(r for r in store.list() if r["key"].endswith("|k2"))
+    assert row["status"] == "completed" and row["result_json"] is None  # never stored unredacted
+
+
+def one_status(store, key):
+    return next(r for r in store.list() if r["key"].endswith("|" + key))["status"]
+
+
+def test_async_unserialisable_result_does_not_leave_key_pending(store):
+    class Evil:
+        def __repr__(self):
+            raise RuntimeError("bad repr")
+
+    @guard(store=store)
+    async def tool():
+        return Evil()
+
+    with pytest.warns(RuntimeWarning):
+        asyncio.run(tool(idemkey="k"))
+    assert one_status(store, "k") == "completed"
+
+
+def test_cli_export_survives_closed_pipe(store, monkeypatch):
+    @guard(store=store)
+    def tool(x):
+        return x
+
+    tool(1, idemkey="k")
+
+    class Closed:
+        def write(self, _):
+            raise BrokenPipeError
+
+        def flush(self):
+            pass
+
+    monkeypatch.setattr("sys.stdout", Closed())
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--store", store.path, "export"])
+    assert e.value.code == 0
+
+
+def test_check_tool_with_inject_key():
+    from idemkey import testing
+
+    world, seen = [], set()
+
+    def charge(cents, *, idempotency_key):
+        if idempotency_key not in seen:
+            seen.add(idempotency_key)
+            world.append(cents)
+        return cents
+
+    rep = testing.check_tool(charge, args=(5,), effects=lambda: len(world),
+                             inject_key="idempotency_key")
+    assert rep.ok, str(rep)
+
+
+def test_cli_doctor_flags_loose_file_mode(store):
+    import os
+    import stat
+
+    if os.name != "posix":
+        pytest.skip("POSIX file modes")
+    os.chmod(store.path, 0o644)
+    code, out, _ = run_cli(store, "doctor")
+    assert code == 1 and "readable by other users" in out
+    os.chmod(store.path, stat.S_IRUSR | stat.S_IWUSR)
+    code, out, _ = run_cli(store, "doctor")
+    assert code == 0

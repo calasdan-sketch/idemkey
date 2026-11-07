@@ -186,6 +186,11 @@ def _canon2(obj, _depth=0, _seen=None) -> str:
             return "deep:" + hashlib.sha256(_ADDR.sub("", repr(obj)).encode("utf-8")).hexdigest()
         except RecursionError:
             raise ValueError("argument is nested too deeply to fingerprint safely") from None
+    t = type(obj)
+    if t is int:  # fast paths for the overwhelmingly common exact types
+        return _canon_number(obj)
+    if t is str:
+        return _canon_text(obj)
     if obj is None:
         return "null"
     if obj is True:

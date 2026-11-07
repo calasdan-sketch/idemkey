@@ -2,6 +2,65 @@
 
 ## 0.3.0 - unreleased
 
+### Round 3 (review pass A + B) - fixes
+
+- **A write that landed could be re-run after a lost response, even with
+  `reconcile=`.** Reconcile was consulted only on a stale takeover / later
+  retry, not between the attempts of one call: `TimeoutError` -> backoff ->
+  the tool ran again. It is now asked before every in-call retry (sync and
+  async). Benchmark: 60/60 duplicate effects before, 0/60 after.
+- **Two different amounts could be treated as the same call.** Numeric
+  fingerprints went through the global `decimal` context (28 digits), so
+  `Decimal("1.0000000000000000000000000000001")` and `...2` shared a
+  fingerprint and the second call replayed the first call's result. Numbers
+  are now encoded exactly.
+- **A hostile or accidental `Decimal("1e999999999")` argument hung the
+  caller** (the encoder expanded it to an integer). It is now encoded as
+  digits + exponent in microseconds. Integers above the interpreter's
+  4300-digit limit no longer raise from the fingerprint.
+- **A result that could not be serialised (or a `redact=` that raised) left
+  the key `pending` after the write had landed**, so a later retry re-ran the
+  write. It is now recorded as `completed`, not replayable, with a
+  `RuntimeWarning`; the unredacted value is never stored.
+- `idemkey log --limit -5` listed everything; it now requires a positive
+  number. `idemkey export | head` no longer prints a traceback.
+- `idemkey log` shortens long keys in the middle so the end of the key stays
+  visible.
+
+### Round 3 - added
+
+- **Typed replay** (`result_codec="typed"`, the default): tuples, `bytes`,
+  `set`/`frozenset`, `Decimal`, `datetime`/`date`/`time`, `UUID` and dicts
+  with non-string keys replay as themselves, so a replay equals the first
+  result. `result_codec="json"` keeps the old behaviour (tuples as lists,
+  other types as `repr()` strings). Stored rows from earlier builds still
+  decode. Arbitrary objects are still stored as `repr()` text.
+- **`RetryableError(retry_after=seconds)`** (or any exception with a numeric
+  `retry_after` attribute): used as the wait before the next attempt, capped
+  at `backoff_cap`.
+- **`on_event=callable`** and the `idemkey` logger (DEBUG): events
+  `executing`, `executed`, `failed`, `replayed`, `retryable_error`,
+  `reconciled`, `fingerprint_mismatch`. A hook that raises never affects the
+  call.
+- **`idemkey.testing`**: `lost_response(fn)` fault injector and
+  `check_tool(fn, ...)`, which runs a tool through "called twice" and "write
+  landed, response lost" and prints a SAFE / NOT SAFE report.
+- **CLI**: `idemkey export` (JSON lines, `--no-results`), `idemkey doctor`
+  (unknown / stale-pending keys, loose file mode; exit 1 when a human is
+  needed), `idemkey log --json`. `DedupStore.iter_rows()`.
+- `bench/bench.py`: `lost` (write lands, response lost, inside one call) and
+  `fp` (large / hostile argument probes) scenarios with a before/after row.
+
+### Round 3 - changed
+
+- v2 fingerprints of text or bytes longer than 4096 characters are a digest of
+  the content, and some numbers are spelled differently (exactness fix above).
+  v2 fingerprints have not been released; rows written by 0.1/0.2 still match
+  through the v1 digest.
+- ~35% faster fingerprints for large integer lists.
+
+### Original round 2 notes
+
 Theme: close the "exactly-once illusion" window and make duplicates
 measurable. Everything below is backward compatible (existing options,
 stored rows and fingerprints keep working).

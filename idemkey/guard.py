@@ -817,9 +817,21 @@ class _Guarded:
     def _payload(o, result):
         if o["store_result"] is False:
             return None, False
-        if o["redact"] is not None:
-            result = o["redact"](result)
-        return _encode_result(result, o["result_max_bytes"], o["result_codec"] == "typed")
+        # The write has already happened. Nothing below may turn that into an
+        # exception that leaves the key pending (a later retry would re-run the
+        # write): a result that cannot be redacted or serialised is recorded as
+        # "completed, not replayable" (fail closed - the unredacted value is
+        # never stored).
+        try:
+            if o["redact"] is not None:
+                result = o["redact"](result)
+            return _encode_result(result, o["result_max_bytes"], o["result_codec"] == "typed")
+        except Exception as exc:  # noqa: BLE001
+            warnings.warn(
+                f"idemkey: the result of a completed call could not be stored "
+                f"({type(exc).__name__} in redact/serialise); recorded as not replayable",
+                RuntimeWarning, stacklevel=2)
+            return None, False
 
     @staticmethod
     def _commit(store, key, owner, o, result):
