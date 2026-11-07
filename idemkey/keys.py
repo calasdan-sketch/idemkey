@@ -115,22 +115,67 @@ _MAX_DEPTH = 40
 _ADDR = re.compile(r" at 0x[0-9a-fA-F]+")
 
 
+_BIG_DIGITS = 4000  # beyond this an integral value is spelled as digits+exponent
+
+
 def _canon_number(x) -> str:
+    """Exact, context-free encoding of a number.
+
+    Never rounds (the global ``decimal`` context would silently merge two
+    Decimals that differ after 28 digits) and never expands a huge exponent
+    into a huge integer (``Decimal("1e999999999")`` must not hang the caller).
+    """
+    if isinstance(x, int):
+        if x.bit_length() <= 14000:  # < 4300 digits, the interpreter's int-to-str limit
+            return f"num:{x}"
+        return ("num:-0x" if x < 0 else "num:0x") + format(abs(x), "x")
     if isinstance(x, float):
         if math.isnan(x):
             return "num:nan"
         if math.isinf(x):
             return "num:inf" if x > 0 else "num:-inf"
+        if x == int(x) and abs(x) < 1e15:
+            return f"num:{int(x)}"  # -0.0 -> num:0, 10.0 -> num:10
         d = decimal.Decimal(x)  # exact binary value: 0.1 != Decimal("0.1")
-    elif isinstance(x, decimal.Decimal):
+    else:
         if not x.is_finite():
             return "num:" + str(x).lower()
         d = x
-    else:
-        d = decimal.Decimal(x)
-    if d == d.to_integral_value():
-        return f"num:{int(d)}"
-    return "num:" + format(d.normalize(), "f")
+    sign, digits, exp = d.as_tuple()
+    digits = "".join(map(str, digits)).lstrip("0")
+    if not digits:
+        return "num:0"
+    stripped = digits.rstrip("0")
+    exp += len(digits) - len(stripped)
+    digits = stripped
+    neg = "-" if sign else ""
+    if exp >= 0:
+        if len(digits) + exp <= _BIG_DIGITS:
+            return f"num:{neg}{digits}{'0' * exp}"
+        return f"num:{neg}{digits}e{exp}"
+    point = len(digits) + exp  # digits before the decimal point
+    if exp < -_BIG_DIGITS:
+        return f"num:{neg}{digits}e{exp}"
+    if point > 0:
+        return f"num:{neg}{digits[:point]}.{digits[point:]}"
+    return f"num:{neg}0.{'0' * -point}{digits}"
+
+
+_HASH_ABOVE = 4096  # strings / bytes longer than this are fingerprinted by digest
+
+
+def _canon_text(obj: str) -> str:
+    text = unicodedata.normalize("NFC", obj)
+    if len(text) > _HASH_ABOVE:
+        return "str:h:" + hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+    return "str:" + json.dumps(text, ensure_ascii=True)
+
+
+def _canon_bytes(obj) -> str:
+    b = bytes(obj)
+    if len(b) > _HASH_ABOVE:
+        return "bytes:h:" + hashlib.sha256(b).hexdigest()
+    return "bytes:" + b.hex()
 
 
 def _canon2(obj, _depth=0, _seen=None) -> str:
@@ -152,9 +197,9 @@ def _canon2(obj, _depth=0, _seen=None) -> str:
     if isinstance(obj, (int, float, decimal.Decimal)):
         return _canon_number(obj)
     if isinstance(obj, str):
-        return "str:" + json.dumps(unicodedata.normalize("NFC", obj), ensure_ascii=True)
+        return _canon_text(obj)
     if isinstance(obj, (bytes, bytearray)):
-        return "bytes:" + bytes(obj).hex()
+        return _canon_bytes(obj)
     if isinstance(obj, (datetime.datetime, datetime.date, datetime.time)):
         return f"{type(obj).__name__}:{obj.isoformat()}"
     if isinstance(obj, datetime.timedelta):
@@ -220,6 +265,6 @@ def fingerprint2(tool: str, args: tuple = (), kwargs: dict | None = None,
     if legacy:
         try:
             fp.alts = (fingerprint(tool, args, kw),)
-        except RecursionError:  # v1 could never fingerprint this call anyway
+        except (RecursionError, ValueError):  # v1 could never fingerprint this call anyway
             fp.alts = ()
     return fp

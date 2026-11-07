@@ -544,6 +544,29 @@ class DedupStore:
                 ).fetchall()
             return [dict(r) for r in rows]
 
+    def iter_rows(self, status=None, batch=500):
+        """Yield every row (oldest first) in batches, so a large store can be
+        exported without loading it into memory or holding the lock."""
+        last = ("", "")
+        while True:
+            with self._lock:
+                self._ensure_open()
+                if status:
+                    rows = self._conn.execute(
+                        "SELECT * FROM idem_keys WHERE status = ? AND (created_at, key) > (?, ?) "
+                        "ORDER BY created_at, key LIMIT ?",
+                        (status, last[0] or 0, last[1], batch)).fetchall()
+                else:
+                    rows = self._conn.execute(
+                        "SELECT * FROM idem_keys WHERE (created_at, key) > (?, ?) "
+                        "ORDER BY created_at, key LIMIT ?",
+                        (last[0] or 0, last[1], batch)).fetchall()
+            if not rows:
+                return
+            for r in rows:
+                yield dict(r)
+            last = (rows[-1]["created_at"], rows[-1]["key"])
+
     def close(self):
         with self._lock:
             self._closed = True

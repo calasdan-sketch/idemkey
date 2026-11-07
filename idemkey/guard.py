@@ -36,6 +36,8 @@ import functools
 import hashlib
 import inspect
 import json
+import logging
+import math
 import os
 import random
 import socket
@@ -46,6 +48,7 @@ import typing
 import uuid
 import warnings
 
+from . import codec as _codec
 from .keys import derive_key, fingerprint2
 from .store import DedupStore
 
@@ -76,7 +79,15 @@ class RetryableError(IdemKeyError):
 
     Retried automatically by default. Anything else propagates immediately
     with no retry and no second execution.
+
+    ``retry_after`` (seconds, optional) is honoured as the wait before the
+    next attempt, capped at ``backoff_cap`` - use it for a 429 / ``Retry-After``.
+    Any exception carrying a numeric ``retry_after`` attribute is treated the same.
     """
+
+    def __init__(self, *args, retry_after=None):
+        super().__init__(*args)
+        self.retry_after = retry_after
 
 
 class FingerprintMismatchError(IdemKeyError):
@@ -211,16 +222,42 @@ def _canonical_call(sig, args, kwargs, ignore=(), normalize=None):
     return bound.args, bound.kwargs
 
 
-def _backoff_delay(attempt, base, cap):
-    # Full jitter: uniform(0, min(cap, base * 2**attempt))
+def _backoff_delay(attempt, base, cap, exc=None):
+    # Full jitter: uniform(0, min(cap, base * 2**attempt)), unless the failure
+    # told us how long to wait (Retry-After): then wait at least that, capped.
+    hint = getattr(exc, "retry_after", None)
+    if isinstance(hint, (int, float)) and not isinstance(hint, bool) and not math.isnan(hint) and hint >= 0:
+        return min(float(hint), cap)
     return random.uniform(0, min(cap, base * (2 ** attempt)))
 
 
-def _encode_result(result, max_bytes):
+_log = logging.getLogger("idemkey")
+
+
+def _emit(o, event, key, tool, **info):
+    """Observability: ``on_event(dict)`` and the ``idemkey`` logger (DEBUG).
+
+    A hook that raises can never break (or change the outcome of) a guarded
+    call. The key is passed as stored; escape it before printing to a terminal.
+    """
+    cb = o.get("on_event")
+    if cb is None and not _log.isEnabledFor(logging.DEBUG):
+        return
+    ev = {"event": event, "key": key, "tool": tool, **info}
+    if _log.isEnabledFor(logging.DEBUG):
+        _log.debug("idemkey %s tool=%s key=%a %s", event, tool, key, info)
+    if cb is not None:
+        try:
+            cb(ev)
+        except Exception:  # noqa: BLE001
+            _log.debug("idemkey on_event hook raised", exc_info=True)
+
+
+def _encode_result(result, max_bytes, typed=True):
     """Best-effort JSON encoding. Returns (payload_or_None, replayable_bool)."""
     try:
-        payload = json.dumps(result, default=repr)
-    except (TypeError, ValueError, RecursionError):
+        payload = _codec.dumps(result) if typed else json.dumps(result, default=repr)
+    except (TypeError, ValueError, RecursionError, OverflowError):
         return None, False
     if len(payload.encode("utf-8")) > max_bytes:
         return None, False
@@ -488,6 +525,7 @@ class _Guarded:
     def __init__(self, fn, **opts):
         self._fn = fn
         self._opts = opts
+        self._tool = opts["tool"] or getattr(fn, "__name__", "unknown")
         functools.update_wrapper(self, fn)
         self._hidden = tuple(n for n in (opts["inject_key"], opts["atomic"]) if n)
         self._check_hidden_and_names(fn)
@@ -648,6 +686,7 @@ class _Guarded:
             f"(tool={row['tool']!r}, scope={row['scope']!r}). Refusing to replay "
             f"that result for these arguments."
         )
+        _emit(self._opts, "fingerprint_mismatch", key, self._tool, policy=policy)
         if policy == "error":
             raise FingerprintMismatchError(msg)
         if policy == "warn":
@@ -661,7 +700,8 @@ class _Guarded:
                 f"key {key!r} completed but its result was not storable; "
                 f"cannot replay for this duplicate call."
             )
-        return json.loads(row["result_json"])
+        _emit(self._opts, "replayed", key, self._tool)
+        return _codec.loads(row["result_json"])
 
     def _unknown_error(self, key, row):
         return OutcomeUnknownError(
@@ -743,9 +783,16 @@ class _Guarded:
                 if found:
                     self._commit(store, key, owner, o, result)
                     return result
+            _emit(o, "executing", key, self._tool, takeover_or_retry=retry)
             if o["atomic"]:
-                return self._run_atomic(store, key, owner, o, args, kwargs)
-            return self._run_attempts(store, key, owner, o, args, kwargs)
+                out = self._run_atomic(store, key, owner, o, args, kwargs)
+            else:
+                out = self._run_attempts(store, key, owner, o, args, kwargs)
+            _emit(o, "executed", key, self._tool)
+            return out
+        except BaseException as exc:
+            _emit(o, "failed", key, self._tool, error=type(exc).__name__)
+            raise
         finally:
             stop.set()
 
@@ -772,7 +819,7 @@ class _Guarded:
             return None, False
         if o["redact"] is not None:
             result = o["redact"](result)
-        return _encode_result(result, o["result_max_bytes"])
+        return _encode_result(result, o["result_max_bytes"], o["result_codec"] == "typed")
 
     @staticmethod
     def _commit(store, key, owner, o, result):
@@ -803,13 +850,23 @@ class _Guarded:
         last_exc = None
         hidden = self._hidden_kwargs(key)
         for attempt in range(o["max_retries"] + 1):
+            if attempt > 0 and o["reconcile"] is not None:
+                # The previous attempt raised a retryable error (a timeout is
+                # exactly "the write may have landed"): ask downstream before
+                # writing again.
+                found, earlier = self._reconcile(store, key, owner, o, args, kwargs)
+                if found:
+                    _emit(o, "reconciled", key, self._tool, attempt=attempt)
+                    self._commit(store, key, owner, o, earlier)
+                    return earlier
             try:
                 result = self._fn(*args, **kwargs, **hidden)
             except o["retry_on"] as exc:
                 last_exc = exc
                 store.heartbeat(key, owner)
+                _emit(o, "retryable_error", key, self._tool, attempt=attempt, error=type(exc).__name__)
                 if attempt < o["max_retries"]:
-                    o["sleep"](_backoff_delay(attempt, o["backoff_base"], o["backoff_cap"]))
+                    o["sleep"](_backoff_delay(attempt, o["backoff_base"], o["backoff_cap"], exc))
                     continue
                 break
             except Exception as exc:  # non-retryable: no second execution, ever
@@ -848,7 +905,7 @@ class _Guarded:
                     store.rollback_atomic(conn)
                     done = True
                     if attempt < o["max_retries"]:
-                        o["sleep"](_backoff_delay(attempt, o["backoff_base"], o["backoff_cap"]))
+                        o["sleep"](_backoff_delay(attempt, o["backoff_base"], o["backoff_cap"], exc))
                         continue
                     break
                 except Exception as exc:
@@ -998,8 +1055,12 @@ class _AsyncGuarded(_Guarded):
                 if found:
                     await asyncio.shield(_to_thread(self._commit, store, key, owner, o, result))
                     return result
-            return await self._arun_attempts(store, key, owner, o, args, kwargs)
+            _emit(o, "executing", key, self._tool, takeover_or_retry=retry)
+            out = await self._arun_attempts(store, key, owner, o, args, kwargs)
+            _emit(o, "executed", key, self._tool)
+            return out
         except asyncio.CancelledError:
+            _emit(o, "failed", key, self._tool, error="CancelledError")
             # Cancelled mid-flight: the write may or may not have landed.
             # Record ``unknown`` (fenced: a no-op if the row already settled)
             # so a same-key retry neither re-executes nor hangs on a dead
@@ -1041,13 +1102,20 @@ class _AsyncGuarded(_Guarded):
         last_exc = None
         hidden = self._hidden_kwargs(key)
         for attempt in range(o["max_retries"] + 1):
+            if attempt > 0 and o["reconcile"] is not None:
+                found, earlier = await self._areconcile(store, key, owner, o, args, kwargs)
+                if found:
+                    _emit(o, "reconciled", key, self._tool, attempt=attempt)
+                    await asyncio.shield(_to_thread(self._commit, store, key, owner, o, earlier))
+                    return earlier
             try:
                 result = await self._fn(*args, **kwargs, **hidden)
             except o["retry_on"] as exc:
                 last_exc = exc
                 await _to_thread(store.heartbeat, key, owner)
+                _emit(o, "retryable_error", key, self._tool, attempt=attempt, error=type(exc).__name__)
                 if attempt < o["max_retries"]:
-                    await self._asleep(o, _backoff_delay(attempt, o["backoff_base"], o["backoff_cap"]))
+                    await self._asleep(o, _backoff_delay(attempt, o["backoff_base"], o["backoff_cap"], exc))
                     continue
                 break
             except Exception as exc:  # non-retryable
@@ -1130,6 +1198,8 @@ _DEFAULTS = {
     "redact": None,
     "store_result": True,
     "error_detail": "full",
+    "result_codec": "typed",   # typed | json
+    "on_event": None,
 }
 
 
@@ -1213,6 +1283,10 @@ def guard(_fn=None, **opts):
 
     if merged["derive"] not in (False, True, "semantic", "seq"):
         raise ValueError("guard() derive must be False, True, 'semantic' or 'seq'")
+    if merged["result_codec"] not in ("typed", "json"):
+        raise ValueError("guard() result_codec must be 'typed' or 'json'")
+    if merged["on_event"] is not None and not callable(merged["on_event"]):
+        raise TypeError("guard() on_event must be callable")
     if merged["error_detail"] not in ("full", "type"):
         raise ValueError("guard() error_detail must be 'full' or 'type'")
     for name in ("inject_key", "atomic"):
