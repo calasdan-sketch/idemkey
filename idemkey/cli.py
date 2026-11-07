@@ -21,8 +21,12 @@ from .guard import DEFAULT_STORE_ENV, DEFAULT_STORE_PATH
 from .store import DedupStore
 
 
+def _store_path(path_arg):
+    return os.path.expanduser(path_arg or os.environ.get(DEFAULT_STORE_ENV, DEFAULT_STORE_PATH))
+
+
 def _resolve_store(path_arg):
-    path = os.path.expanduser(path_arg or os.environ.get(DEFAULT_STORE_ENV, DEFAULT_STORE_PATH))
+    path = _store_path(path_arg)
     if not os.path.exists(path):
         print(f"no dedup store at {path}", file=sys.stderr)
         raise SystemExit(1)
@@ -151,6 +155,12 @@ def cmd_export(args):
 
 def cmd_doctor(args):
     """Health check for operators and CI. Exit 0 = nothing needs a human."""
+    # Read the file mode BEFORE opening: DedupStore tightens it to 0600 on open,
+    # which would hide exactly what this check is for.
+    mode_before = None
+    path = _store_path(args.store)
+    if os.name == "posix" and os.path.exists(path):
+        mode_before = os.stat(path).st_mode & 0o777
     store = _resolve_store(args.store)
     now = time.time()
     problems, notes = [], []
@@ -177,11 +187,9 @@ def cmd_doctor(args):
                      f"(too large / not serialisable / store_result=False): a duplicate call raises")
     if oldest is not None and now - oldest > 30 * 86400:
         notes.append("rows older than 30 days exist: consider `idemkey purge` or guard(ttl=...)")
-    if os.name == "posix" and os.path.exists(store.path):
-        mode = os.stat(store.path).st_mode & 0o077
-        if mode:
-            problems.append(f"store file is readable by other users (mode {oct(os.stat(store.path).st_mode & 0o777)}); "
-                            f"it holds tool results in plaintext")
+    if mode_before is not None and mode_before & 0o077:
+        problems.append(f"store file was readable by other users (mode {oct(mode_before)}); it holds tool "
+                        f"results in plaintext. Opening it just now tightened it to 0600 - check the directory too")
     st = store.stats()
     print(f"store: {_safe(st['path'])}  keys: {st['total']}")
     for line in problems:

@@ -46,8 +46,8 @@
   `check_tool(fn, ...)`, which runs a tool through "called twice" and "write
   landed, response lost" and prints a SAFE / NOT SAFE report.
 - **CLI**: `idemkey export` (JSON lines, `--no-results`), `idemkey doctor`
-  (unknown / stale-pending keys, loose file mode; exit 1 when a human is
-  needed), `idemkey log --json`. `DedupStore.iter_rows()`.
+  (unknown / stale-pending keys, loose file mode read before the store's own
+  open tightens it to 0600; exit 1 when a human is needed), `idemkey log --json`. `DedupStore.iter_rows()`.
 - `bench/bench.py`: `lost` (write lands, response lost, inside one call) and
   `fp` (large / hostile argument probes) scenarios with a before/after row.
 
