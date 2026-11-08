@@ -141,8 +141,11 @@ def _canon_number(x) -> str:
         if not x.is_finite():
             return "num:" + str(x).lower()
         d = x
-    sign, digits, exp = d.as_tuple()
-    digits = "".join(map(str, digits)).lstrip("0")
+    sign, digit_tuple, exp_raw = d.as_tuple()
+    if not isinstance(exp_raw, int):  # NaN / Infinity: handled above, kept for the type checker
+        return "num:" + str(d).lower()
+    exp = exp_raw
+    digits = "".join(map(str, digit_tuple)).lstrip("0")
     if not digits:
         return "num:0"
     stripped = digits.rstrip("0")

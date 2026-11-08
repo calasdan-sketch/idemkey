@@ -264,6 +264,10 @@ def _encode_result(result, max_bytes, typed=True):
     return payload, True
 
 
+# Text a model writes into an optional string argument when it has nothing to say.
+PLACEHOLDER_KEYS = frozenset({"null", "none", "nil", "undefined", "nan", "n/a", "na"})
+
+
 def _validate_key(key, key_arg):
     if not isinstance(key, str):
         raise InvalidKeyError(
@@ -277,6 +281,17 @@ def _validate_key(key, key_arg):
     if len(key) > MAX_KEY_LENGTH:
         raise InvalidKeyError(
             f"idempotency key ({key_arg}=) is {len(key)} chars; max is {MAX_KEY_LENGTH}"
+        )
+    if key != key.strip():
+        raise InvalidKeyError(
+            f"idempotency key ({key_arg}=) has spaces or line breaks at the start or "
+            f"end; 'order-1 ' and 'order-1' would be two different keys. Remove them."
+        )
+    if key.lower() in PLACEHOLDER_KEYS:
+        raise InvalidKeyError(
+            f"idempotency key ({key_arg}={key!r}) looks like an empty placeholder a model "
+            f"fills in when it has no real key, and would make unrelated calls share one key. "
+            f"Pass a real key, or omit the argument."
         )
     bad = _bad_char(key)
     if bad is not None:

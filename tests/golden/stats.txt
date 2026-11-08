@@ -1,0 +1,6 @@
+store: <STORE>
+total keys: 4
+  completed  1
+  failed     1
+  pending    1
+  unknown    1

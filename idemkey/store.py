@@ -23,6 +23,7 @@ import sqlite3
 import threading
 import time
 import weakref
+from typing import Any
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS idem_keys (
@@ -65,7 +66,21 @@ class StoreCorruptedError(Exception):
     """Raised when the SQLite file is unreadable/corrupt."""
 
 
-_STORES = weakref.WeakSet()
+class StoreBusyError(sqlite3.OperationalError):
+    """The store file stayed locked by another program for the whole retry
+    budget (about half a minute). The tool was NOT started for a claim that
+    fails this way. Subclasses ``sqlite3.OperationalError`` so older
+    ``except sqlite3.OperationalError`` code keeps working."""
+
+
+def _busy_error(path):
+    return StoreBusyError(
+        f"the key store {path!r} is locked by another program (database is locked); "
+        f"close whatever else has it open (a DB browser, a backup, a stuck process) and retry"
+    )
+
+
+_STORES: Any = weakref.WeakSet()
 
 
 def _reset_locks_after_fork():
@@ -96,7 +111,7 @@ class DedupStore:
         self._lock = threading.Lock()
         self._settled_cv = threading.Condition()
         self._settle_seq = 0
-        self._conn = None
+        self._conn: Any = None
         self._pid = None
         self._closed = False
         _STORES.add(self)
@@ -215,8 +230,10 @@ class DedupStore:
             try:
                 return self._claim(key, tool, fingerprint, scope, owner, claim_ttl, ttl, alt_fingerprints)
             except sqlite3.OperationalError as exc:
-                if not _is_busy(exc) or attempt == WRITE_RETRIES - 1:
+                if not _is_busy(exc):
                     raise
+                if attempt == WRITE_RETRIES - 1:
+                    raise _busy_error(self.path) from exc
                 with self._lock:
                     try:
                         self._conn.rollback()
@@ -345,8 +362,10 @@ class DedupStore:
                     self._notify_settled()
                     return cur.rowcount == 1
             except sqlite3.OperationalError as exc:
-                if not _is_busy(exc) or attempt == WRITE_RETRIES - 1:
+                if not _is_busy(exc):
                     raise
+                if attempt == WRITE_RETRIES - 1:
+                    raise _busy_error(self.path) from exc
                 try:
                     self._conn.rollback()
                 except Exception:  # noqa: BLE001, S110
@@ -548,6 +567,56 @@ class DedupStore:
                 return cur.fetchone()["n"]
             self._conn.commit()
             return cur.rowcount
+
+    def migrate_legacy_keys(self, dry_run=False):
+        """Rewrite 0.1.x rows (stored under the raw key) to the namespaced
+        layout ``scope|tool||key`` that 0.2+ looks up, so a store written by
+        0.1.x keeps replaying without ``namespace=False``.
+
+        0.1.x had no ``key_prefix``, so the prefix part is empty. Rows already
+        in namespaced form, rows whose scope/tool contain ``|``, and rows whose
+        new name is already taken are left alone (and counted). Status,
+        result and fingerprint are not touched. One transaction: all or
+        nothing. Returns ``{"migrated", "already_namespaced", "skipped"}``.
+        """
+        with self._lock:
+            self._ensure_open()
+            conn = self._conn
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = conn.execute("SELECT key, tool, scope FROM idem_keys").fetchall()
+                out = {"migrated": 0, "already_namespaced": 0, "skipped": 0}
+                for r in rows:
+                    key, tool, scope = r["key"], r["tool"], r["scope"]
+                    parts = key.split("|", 3)
+                    if len(parts) == 4 and parts[0] == scope and parts[1] == tool:
+                        out["already_namespaced"] += 1
+                        continue
+                    new = f"{scope}|{tool}||{key}"
+                    if "|" in scope or "|" in tool or conn.execute(
+                            "SELECT 1 FROM idem_keys WHERE key = ?", (new,)).fetchone():
+                        out["skipped"] += 1
+                        continue
+                    if not dry_run:
+                        conn.execute("UPDATE idem_keys SET key = ? WHERE key = ?", (new, key))
+                    out["migrated"] += 1
+                if dry_run:
+                    conn.rollback()
+                else:
+                    conn.commit()
+                return out
+            except BaseException:
+                conn.rollback()
+                raise
+
+    def quick_check(self):
+        """SQLite's own corruption check. Returns ``[]`` when the file is sound,
+        otherwise the problems it reported (plain strings)."""
+        with self._lock:
+            self._ensure_open()
+            rows = self._conn.execute("PRAGMA quick_check").fetchall()
+        msgs = [str(r[0]) for r in rows]
+        return [] if msgs == ["ok"] else msgs
 
     def stats(self):
         with self._lock:

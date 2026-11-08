@@ -36,9 +36,10 @@ from .guard import (
     run,
 )
 from .keys import derive_key, fingerprint, fingerprint2, is_derived, new_key
-from .store import DedupStore, StoreCorruptedError
+from .store import DedupStore, StoreBusyError, StoreCorruptedError
 
 __version__ = "0.3.0"
+__author__ = "Calas Automations Inc."
 
 __all__ = [
     "MAX_KEY_LENGTH",
@@ -56,6 +57,7 @@ __all__ = [
     "ReconcileError",
     "ResultNotReplayableError",
     "RetryableError",
+    "StoreBusyError",
     "StoreCorruptedError",
     "VerificationError",
     "derive_key",

@@ -1,0 +1,1 @@
+dry run: 3 entries older than 24.0h would be purged; nothing deleted

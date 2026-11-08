@@ -1,4 +1,6 @@
-include LICENSE CHANGELOG.md README.md
+include LICENSE CHANGELOG.md README.md PUBLISH-CHECKLIST.md
+recursive-include docs *.md
 recursive-include tests *.py
+recursive-include tests/golden *.txt *.json *.jsonl
 recursive-include bench *.py *.json
 prune .github

@@ -187,7 +187,9 @@ def cmd_doctor(args):
     problems, notes = [], []
     counts = {"pending_stale": 0, "pending_live": 0, "unknown": 0, "failed": 0, "not_replayable": 0}
     oldest = None
+    legacy = 0
     for r in store.iter_rows():
+        legacy += not _is_namespaced(r)
         oldest = r["created_at"] if oldest is None else min(oldest, r["created_at"])
         if r["status"] == "pending":
             counts["pending_stale" if now - r["heartbeat"] > args.claim_ttl else "pending_live"] += 1
@@ -211,6 +213,13 @@ def cmd_doctor(args):
     if mode_before is not None and mode_before & 0o077:
         problems.append(f"store file was readable by other users (mode {oct(mode_before)}); it holds tool "
                         f"results in plaintext. Opening it just now tightened it to 0600 - check the directory too")
+    bad = store.quick_check()
+    if bad:
+        problems.append("SQLite's own check found damage in the store file: "
+                        + "; ".join(bad[:3]) + " - restore it from a backup or move it aside")
+    if legacy:
+        notes.append(f"{legacy} key(s) look like they were written by idemkey 0.1.x (no scope|tool| prefix): "
+                     f"`idemkey migrate` makes them replay again (or pass namespace=False)")
     st = store.stats()
     if args.json:
         print(json.dumps({"path": st["path"], "keys": st["total"], "ok": not problems,
@@ -227,6 +236,23 @@ def cmd_doctor(args):
         print("ok")
     if problems:
         raise SystemExit(1)
+
+
+def _is_namespaced(row):
+    parts = row["key"].split("|", 3)
+    return len(parts) == 4 and parts[0] == row["scope"] and parts[1] == row["tool"]
+
+
+def cmd_migrate(args):
+    """Rename 0.1.x rows to the namespaced layout so they replay without namespace=False."""
+    store = _resolve_store(args.store)
+    out = store.migrate_legacy_keys(dry_run=args.dry_run)
+    if args.json:
+        print(json.dumps({**out, "dry_run": args.dry_run}))
+        return
+    verb = "would migrate" if args.dry_run else "migrated"
+    print(f"{verb} {out['migrated']} key(s); {out['already_namespaced']} already in the new layout; "
+          f"{out['skipped']} left alone")
 
 
 def cmd_forget(args):
@@ -303,6 +329,11 @@ def build_parser():
     pd.add_argument("--claim-ttl", type=float, default=300.0, help="seconds without heartbeat = dead owner")
     pd.add_argument("--json", action="store_true", help="machine-readable result (exit code unchanged)")
     pd.set_defaults(func=cmd_doctor)
+
+    pg = sub.add_parser("migrate", help="make a store written by idemkey 0.1.x replay under 0.2+ (rename keys)")
+    pg.add_argument("--dry-run", action="store_true", help="count what would change, change nothing")
+    pg.add_argument("--json", action="store_true", help="machine-readable output")
+    pg.set_defaults(func=cmd_migrate)
 
     pt = sub.add_parser("stats", help="store statistics")
     pt.add_argument("--json", action="store_true", help="machine-readable output")

@@ -1,0 +1,21 @@
+{
+  "key": "default|charge||order-1",
+  "tool": "charge",
+  "fingerprint": "ffffffff",
+  "scope": "default",
+  "status": "completed",
+  "result_json": "{\"id\": \"ch_1\"}",
+  "replayable": 1,
+  "error": null,
+  "attempts": 1,
+  "owner": "host:1:abc",
+  "created_at": 1000.0,
+  "updated_at": 1000.0,
+  "heartbeat": 1000.0,
+  "created_at_human": "1970-01-01 00:16:40",
+  "updated_at_human": "1970-01-01 00:16:40",
+  "heartbeat_human": "1970-01-01 00:16:40",
+  "result": {
+    "id": "ch_1"
+  }
+}

@@ -38,6 +38,13 @@ PyPI currently has 0.1.1 only. This README describes 0.3.0 (unreleased): until
 it is released, install it from a checkout of this repo with `pip install .`,
 and read *Upgrading from 0.1.1* in the CHANGELOG first.
 
+**Already have a store written by 0.1.1?** Run `idemkey --store YOUR.db migrate`
+once (stop any 0.1.1 process first). It renames the old keys to the 0.2+ layout
+so retries of earlier calls keep replaying instead of running again. Add
+`--dry-run` to see the count first. (`idemkey doctor` tells you when it finds
+old-layout keys.) Without it, those old keys are simply not found and the call
+runs once more.
+
 Check the install worked:
 
 ```bash
@@ -88,6 +95,10 @@ moves money, sends messages or creates records.
 Keys must be non-blank strings of at most 255 characters. A blank key
 (`idemkey=""`, e.g. an unset template variable) raises `InvalidKeyError`
 instead of silently running without dedup.
+Also refused, because models produce them by accident: a key with spaces or a
+line break at either end (`"order-1 "` would be a second, different key), and
+the placeholder words a model writes when it has no value (`null`, `none`,
+`nil`, `undefined`, `nan`, `n/a`, `na`, any capitalisation).
 
 Three ways to supply the key:
 
@@ -288,6 +299,7 @@ idemkey doctor                           # unknown / stale-pending keys, loose f
 idemkey doctor --json                    # same, machine-readable (same exit code)
 idemkey stats --json
 idemkey purge --older-than 24 --dry-run  # count what would go, delete nothing
+idemkey migrate --dry-run             # old 0.1.x keys -> 0.2+ layout (drop --dry-run to do it)
 idemkey demo                             # 30-second self-check in a temporary store
 idemkey show order-7f3a                  # full row incl. replayed result
 idemkey stats                            # counts by status
@@ -373,7 +385,7 @@ for latch; one run, **on a VM shared with other jobs (load average 3-10 while it
 ran), so the speed columns are noisy** - the same code measured 1721 new keys/s
 in the previous round's run and 996 in this one. Raw numbers: `bench/results.json` (round 3, with competitors); a round-4 re-run of
 the idemkey rows only is `bench/results-round4.json` - same correctness numbers, speed
-columns not comparable (see `docs/ROUND4.md`).
+columns not comparable (see `docs/ROUND4.md`). Round 5 re-ran the idemkey rows against the previous commit (`bench/results-round5.json`): every correctness number is identical; speed was again dominated by load noise (see `docs/ROUND5.md`).
 
 | | duplicate effects | lost effects | 1000 racers x 20 keys: keys with a duplicate | new keys/s | replays/s |
 |---|---|---|---|---|---|
@@ -471,6 +483,13 @@ the three ways of closing the crash-after-write window.
   keys in live agent loops.
 - **Benchmark scope**: single 2-vCPU VM, one run per cell, POSIX only
   (`bench/bench.py` uses `fcntl`).
+- **A locked store stops the call, loudly.** If another program holds the
+  store file locked for about half a minute (a DB browser with an open
+  transaction, a stuck backup), `StoreBusyError` (a `sqlite3.OperationalError`)
+  is raised and the tool is **not** started. Nothing is retried forever.
+- **Deleting the store file under a running process** is not noticed: that
+  process keeps writing to the now-unlinked file, and other processes start a
+  new, empty store. Don't delete or replace the file while agents run.
 - **Wall-clock TTL.** Stale-claim reclamation uses wall-clock heartbeats. An
   NTP jump forward can prematurely stale a live claim. Set `claim_ttl` above
   your max expected execution time; the wrapper heartbeats during execution to

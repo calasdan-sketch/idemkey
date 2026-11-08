@@ -1,11 +1,20 @@
-# Publish checklist for idemkey 0.3.0 (for the owner - nothing here has been run)
+# Publish checklist for idemkey 0.3.0 (for the owner - the upload steps below have NOT been run)
 
-**Version to release: 0.3.0.** PyPI currently has 0.1.1 only (checked 2026-11-07).
+**Version to release: 0.3.0.** PyPI currently has 0.1.1 only (checked 2026-11-08).
 0.2.0 was never released, so 0.3.0 includes everything in the CHANGELOG under
 "0.3.0 - unreleased". It is a minor bump for a 0.x package, but it is **not fully
 backward compatible with 0.1.1**: stored keys are now namespaced
 (`scope|tool|prefix|key`). Someone with a 0.1.1 store keeps working only if they
 pass `namespace=False`. The CHANGELOG says so at the top of the 0.3.0 entry.
+
+## What changed in round 5 that you should know about
+
+- Keys such as `"null"`, `"none"` and keys with a space at either end are now
+  refused (models produce them by accident). Anyone who really used such a key
+  will get a clear error. This is listed in the CHANGELOG.
+- New command `idemkey migrate` for people upgrading from 0.1.1 (the README and
+  CHANGELOG explain when to run it).
+- The author on PyPI will read "Calas Automations Inc." (checked in the built file).
 
 ## Decide first
 
@@ -20,12 +29,15 @@ pass `namespace=False`. The CHANGELOG says so at the top of the 0.3.0 entry.
 
 ```bash
 python -m venv /tmp/idemkey-check && source /tmp/idemkey-check/bin/activate
-pip install build twine pytest
+pip install build twine pytest hypothesis mypy ruff
 cd <your checkout of the repo>
-python -m pytest -q                   # expect: all passed (a few MCP tests skip if mcp is not installed)
+ruff check idemkey tests && mypy idemkey   # expect: no problems
+python -m pytest -q                   # expect: all passed (a few tests skip if mcp / hypothesis are not installed)
+python bench/mutation_check.py        # expect: 15/15 mutants killed (about 2 minutes)
 python -m build --outdir /tmp/idemkey-dist .
 twine check /tmp/idemkey-dist/*       # expect: PASSED twice
 unzip -l /tmp/idemkey-dist/*.whl      # expect: LICENSE inside licenses/, py.typed present
+unzip -p /tmp/idemkey-dist/*.whl 'idemkey-*.dist-info/METADATA' | head -8   # expect: Author: Calas Automations Inc.
 pip install /tmp/idemkey-dist/*.whl   # a normal, non-editable install
 idemkey --version                     # expect: idemkey 0.3.0
 idemkey demo                          # expect: "idemkey works on this machine."

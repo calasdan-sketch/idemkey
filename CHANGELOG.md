@@ -9,6 +9,33 @@ reading a store written by 0.1.x pass `namespace=False`. Calls with a key and
 the same arguments keep replaying; numeric/text fingerprints written by 0.1/0.2
 still match.
 
+### Round 5 (upgrade path, hostile model input, locked store) - fixed and added
+
+- **Upgrading from 0.1.1 silently re-ran old calls.** 0.1.1 stored raw keys; 0.3
+  looks them up namespaced, so a retry of a call made before the upgrade ran
+  again unless `namespace=False` was passed (checked by writing a store with the
+  real 0.1.1 wheel). New `idemkey migrate [--dry-run] [--json]` and
+  `DedupStore.migrate_legacy_keys()` rename the old rows in one transaction
+  (never overwrites, skips names with `|`); `idemkey doctor` now says when it
+  sees old-layout keys. Stop 0.1.1 processes before migrating: they write raw
+  keys again.
+- **Behaviour change, on purpose:** keys with spaces/line breaks at either end
+  and the placeholder words `null`, `none`, `nil`, `undefined`, `nan`, `n/a`,
+  `na` now raise `InvalidKeyError`. Models fill an optional string argument
+  with such text; before, two unrelated calls could end up sharing the key
+  `"null"`, and `"order-1 "` / `"order-1"` were two keys for one order.
+- **A locked store file gave a raw `sqlite3.OperationalError` after ~30 s.** It
+  is now `StoreBusyError` (still a `sqlite3.OperationalError`) with a plain
+  sentence; the tool is not started (as before).
+- `idemkey doctor` runs SQLite's `PRAGMA quick_check` and reports damage.
+- `mypy idemkey` is clean (was 8 errors; one was a variable reused as two types
+  in the number fingerprint - behaviour unchanged, golden-checked against 0.1.1
+  fingerprints). `idemkey.__author__` added.
+- Tests: golden-file tests for every CLI output format (`tests/golden/`),
+  property-based and model-based tests with `hypothesis` (`pip install hypothesis`;
+  skipped without it), and `bench/mutation_check.py` (15 deliberate breakages,
+  all caught).
+
 ### Round 4 (the first hour after `pip install`) - fixed
 
 - **The sdist and wheel shipped without a LICENSE file** although the metadata
